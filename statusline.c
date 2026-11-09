@@ -1,9 +1,9 @@
 /*
  * Claude Code statusline — fast, dependency-free C.
  *
- *   Opus 5.5  │  ctx ━━━━━━━━━━━━ 42%  │  high  ⚡fast
- *   current   ━━━━━━━━━━━━   28%   ↻ 19:00
- *   weekly    ━━━━━━━━━━━━   79%   ↻ Thu 11/12 10:00
+ *   Opus 5.5  │  ctx ━━━━━─────── 42%  │  high  ⚡fast
+ *   current  ━━━─────────   28%   ↻ 19:00
+ *   weekly   ━━━━━━━━━━──   86%!  ↻ Thu 11/12 10:00
  *
  * Reads the statusLine JSON payload on stdin and prints up to three lines.
  * Usage: statusline [--light]   (--light = palette for light terminal backgrounds)
@@ -19,16 +19,26 @@
 #define RST    "\033[0m"
 
 typedef struct {
-    const char *model, *dim, *sep, *empty, *text, *eff, *fast, *ok, *warn, *crit;
+    const char *model, *dim, *sep, *empty, *text, *eff, *fast, *ok, *warn, *crit, *crit_bar;
 } Palette;
 
+/*
+ * Color-blind-safe gauge colors (based on the Okabe-Ito palette):
+ *   < 50% blue  ·  < 80% orange  ·  >= 80% vermillion + bold + "!"
+ * Severity never relies on hue alone: high usage also gets bold text and a
+ * "!" marker, and the bar's filled part (━) differs in shape from its track (─).
+ * Model and effort use neutral colors so they never look like a gauge state.
+ */
+#define BOLD(n) "\033[1;38;5;" #n "m"
 static const Palette DARK = {
-    ESC(117), ESC(243), ESC(240), ESC(238), ESC(252),
-    ESC(215), ESC(221), ESC(114), ESC(221), ESC(203),
+    .model = BOLD(255), .dim = ESC(245), .sep = ESC(240), .empty = ESC(240), .text = ESC(252),
+    .eff = ESC(183), .fast = BOLD(229),
+    .ok = ESC(75), .warn = ESC(214), .crit = BOLD(202), .crit_bar = ESC(202),
 };
 static const Palette LIGHT = {
-    ESC(25),  ESC(244), ESC(249), ESC(252), ESC(236),
-    ESC(166), ESC(130), ESC(28),  ESC(172), ESC(160),
+    .model = BOLD(235), .dim = ESC(243), .sep = ESC(249), .empty = ESC(250), .text = ESC(236),
+    .eff = ESC(97), .fast = BOLD(236),
+    .ok = ESC(25), .warn = ESC(172), .crit = BOLD(130), .crit_bar = ESC(130),
 };
 static const Palette *P = &DARK;
 
@@ -146,15 +156,21 @@ static const char *pct_color(double p) {
 
 static double clamp(double p) { return p < 0 ? 0 : (p > 100 ? 100 : p); }
 
+/* percentage with a non-color severity cue: "!" at >= 80%, padded otherwise */
+static void put_pct(double p, int width, int pad) {
+    printf("%s%*d%%%s" RST, pct_color(p), width, (int)(clamp(p) + 0.5),
+           p >= 80 ? "!" : (pad ? " " : ""));
+}
+
 static void put_bar(double p, int known) {
     int filled = known ? (int)(clamp(p) / 100.0 * BAR_CELLS + 0.5) : 0;
     if (known && p > 0 && filled == 0) filled = 1; /* show any non-zero usage */
     if (filled) {
-        fputs(pct_color(p), stdout);
+        fputs(p >= 80 ? P->crit_bar : pct_color(p), stdout); /* bar never bold */
         for (int i = 0; i < filled; i++) fputs("━", stdout);
     }
     fputs(P->empty, stdout);
-    for (int i = filled; i < BAR_CELLS; i++) fputs("━", stdout);
+    for (int i = filled; i < BAR_CELLS; i++) fputs("─", stdout);
     fputs(RST, stdout);
 }
 
@@ -168,7 +184,8 @@ static void put_limit(const char *json, const char *label, const char *win, int 
 
     printf("\n%s%-8s" RST " ", P->dim, label);
     put_bar(pct, 1);
-    printf("%s  %3d%%" RST, pct_color(pct), (int)(clamp(pct) + 0.5));
+    fputs("  ", stdout);
+    put_pct(pct, 3, 1);
 
     if (has_reset) {
         time_t t = (time_t)reset, now = time(NULL);
@@ -180,7 +197,7 @@ static void put_limit(const char *json, const char *label, const char *win, int 
                         : (rt.tm_yday == nt.tm_yday && rt.tm_year == nt.tm_year) ? "%H:%M"
                         : "%a %H:%M";
         strftime(buf, sizeof buf, fmt, &rt);
-        printf("%s   ↻ %s%s" RST, P->dim, P->text, buf);
+        printf("%s  ↻ %s%s" RST, P->dim, P->text, buf);
     }
 }
 
@@ -212,7 +229,7 @@ int main(int argc, char **argv) {
     double ctx = 0;
     int has_ctx = get_num(json, "context_window.used_percentage", &ctx);
     put_bar(ctx, has_ctx);
-    if (has_ctx) printf("%s %d%%" RST, pct_color(ctx), (int)(clamp(ctx) + 0.5));
+    if (has_ctx) { putchar(' '); put_pct(ctx, 1, 0); }
     else         printf("%s --%%" RST, P->dim);
 
     int has_eff = get_str(json, "effort.level", effort, sizeof effort);

@@ -3,12 +3,13 @@
 **English** | [한국어](README_한국어.md)
 
 A fast, minimal status line for [Claude Code](https://code.claude.com), written in plain C.
-One ~35 KB binary with no dependencies (no `jq`, Node, or Python), and it renders in about 1–2 ms.
+One ~50 KB binary with no dependencies (no `jq`, Node, or Python), and it renders in about 1–2 ms.
+The colors are color-blind friendly, and severity is never shown by color alone.
 
 ```
-Opus 5.5  │  ctx ━━━━━━━━━━━━ 42%  │  high  ⚡fast
-current  ━━━━━━━━━━━━   28%   ↻ 17:04
-weekly   ━━━━━━━━━━━━   79%   ↻ Thu 11/12 15:04
+Opus 5.5  │  ctx ━━━━━─────── 42%  │  high  ⚡fast
+current  ━━━━━━━━─────   65%   ↻ 17:04
+weekly   ━━━━━━━━━━━─   88%!  ↻ Thu 11/12 15:04
 ```
 
 | Dark terminal | Light terminal (`--light`) |
@@ -23,7 +24,7 @@ weekly   ━━━━━━━━━━━━   79%   ↻ Thu 11/12 15:04
 | 2 | **current**: 5-hour rate-limit usage and reset time |
 | 3 | **weekly**: 7-day rate-limit usage and reset date and time |
 
-- Bars are colored by usage: green below 50%, yellow below 80%, red at 80% and above.
+- Bars are colored by usage: blue below 50%, orange below 80%, and dark vermillion with a bold `!` marker at 80% and above. See [Color-blind friendly](#color-blind-friendly).
 - The two rate-limit lines share the same layout. They appear only when Claude Code sends rate-limit data (claude.ai Pro/Max subscribers, after the first response of a session). Otherwise only line 1 is shown.
 - A reset later today shows just the time. A later day adds the weekday.
 - The permission mode (auto, plan, …) is not part of the status line data, and Claude Code already shows it in the footer right below.
@@ -95,6 +96,24 @@ Before building this, we surveyed popular and recently updated status line proje
 Also see [ccusage](https://github.com/ccusage/ccusage) (★19.4k), a usage and cost analysis tool that also offers a status line mode.
 
 **Why another one?** We wanted the readability of the dot-gauge design, with a cleaner single style for every bar, native speed, and zero dependencies, all in a file small enough to read in one sitting.
+
+## Color-blind friendly
+
+The default palettes are designed for red-green color blindness (protanopia and deuteranopia), and severity never relies on color alone.
+
+| Usage | Color | Extra cue (no color needed) |
+|---|---|---|
+| below 50% | blue | — |
+| 50–79% | orange | — |
+| 80% and above | dark vermillion | **bold** number and a `!` marker (`88%!`) |
+
+- The filled part of a bar is a thick line (`━`) and the empty track is a thin line (`─`), so you can read how full it is even with low color contrast.
+- The model name and effort use neutral colors so they are never mistaken for a gauge state.
+- Every gauge also prints its exact percentage.
+
+The image below shows the output in both palettes next to simulated protanopia and deuteranopia (Machado et al. 2009 model). Blue and orange stay clearly distinct. Orange and vermillion are told apart by brightness, bold text, and the `!` marker.
+
+![color-blind simulation](docs/colorblind-check.png)
 
 ## License
 
