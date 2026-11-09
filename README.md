@@ -7,17 +7,17 @@ One ~50 KB binary with no dependencies (no `jq`, Node, or Python at run time). E
 You pick the palette once at install time, and severity is never shown by color alone.
 
 ```
-Opus 5.5  │  ctx ━━━━━───────  │  high  ⚡fast
-current  ━━━━━━━━────   ↻ 17:04
-weekly   ━━━━━━━━━━━─!  ↻ Thu 11/12 15:04
+Opus 5.5  │  context ━━━━━───────
+high      │  5h      ━━━━━━━━────   2h05m
+⚡fast    │  7d      ━━━━━━━━━━━─!  3d04h
 ```
 
 With `--pct`, the percentages are printed too:
 
 ```
-Opus 5.5  │  ctx ━━━━━─────── 42%  │  high  ⚡fast
-current  ━━━━━━━━────   65%   ↻ 17:04
-weekly   ━━━━━━━━━━━─   88%!  ↻ Thu 11/12 15:04
+Opus 5.5  │  context ━━━━━───────   42%
+high      │  5h      ━━━━━━━━────   65%   2h05m
+⚡fast    │  7d      ━━━━━━━━━━━─   88%!  3d04h
 ```
 
 | Dark terminal | Light terminal (`--light`) |
@@ -69,14 +69,13 @@ Add this to `~/.claude/settings.json` with the flags you want:
 
 ## What it shows
 
-| Line | Content |
+| Column | Content |
 |---|---|
-| 1 | Model name · context window bar · reasoning effort (`low` … `max`) · `⚡fast` when fast mode is on |
-| 2 | **current**: 5-hour rate-limit usage and reset time |
-| 3 | **weekly**: 7-day rate-limit usage and reset date and time |
+| Left | Model name, then the reasoning effort (`low` … `max`), then `⚡fast` when fast mode is on |
+| Right | Three aligned bars: **context** (context window), **5h** (5-hour rate limit), **7d** (7-day rate limit), each limit with the time left until it resets, in gray |
 
-- Lines 2 and 3 appear only when Claude Code sends rate-limit data (claude.ai Pro/Max subscribers, after the first response of a session).
-- A reset later today shows just the time. A later day adds the weekday.
+- The 5h and 7d bars appear only when Claude Code sends rate-limit data (claude.ai Pro/Max subscribers, after the first response of a session).
+- The time left is `42m` under an hour, `2h05m` under a day, and `3d04h` beyond that.
 - Missing fields degrade gracefully. For example, early in a session the context shows `--` (`--%` with `--pct`).
 
 ## Colors

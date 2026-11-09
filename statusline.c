@@ -1,11 +1,12 @@
 /*
  * Claude Code statusline — fast, dependency-free C.
  *
- *   Opus 5.5  │  ctx ━━━━━─────── 42%  │  high  ⚡fast
- *   current  ━━━─────────   28%   ↻ 19:00
- *   weekly   ━━━━━━━━━━──   86%!  ↻ Thu 11/12 10:00
+ *   Opus 5.5  │  context ━━━━━───────
+ *   high      │  5h      ━━━━━━━━────   2h05m
+ *   ⚡fast     │  7d      ━━━━━━━━━━━─!  3d04h
  *
- * Reads the statusLine JSON payload on stdin and prints up to three lines.
+ * Reads the statusLine JSON payload on stdin and prints up to three lines in two
+ * columns: model and effort on the left, three aligned gauges on the right.
  * The flags are chosen once at install time (setup.sh writes them into the
  * statusLine command in ~/.claude/settings.json).
  * Build: cc -O2 -o statusline statusline.c
@@ -304,28 +305,57 @@ static void put_value(int p, int width, int pad) {
     else if (pad)     putchar(' ');
 }
 
-/* one rate-limit line; win is the object at rate_limits.<window> */
-static void put_limit(const char *win, const char *label, int long_fmt) {
-    double raw, reset;
-    if (!win || !get_num(win, "used_percentage", &raw)) return;
-    int p = pct_round(raw);
+/* gauge label, padded so all three bars start in the same column */
+static void put_label(const char *label) { printf("%s%-7s" RST " ", P->dim, label); }
 
-    printf("\n%s%-8s" RST " ", P->dim, label);
+/* context row: "context ━━━━━───────" (unknown: "--") */
+static void put_ctx(const char *json) {
+    double raw = 0;
+    int has = get_num(json, "context_window.used_percentage", &raw);
+    int p = pct_round(raw);
+    put_label("context");
+    put_bar(p, raw, has);
+    if (show_pct) fputs("  ", stdout);
+    if (!has) printf("%s%s" RST, P->dim, show_pct ? " --%" : " --");
+    else      put_value(p, 3, 0);
+}
+
+/*
+ * Time left until resets_at: "42m", "2h05m", "3d04h". Minutes round up, so
+ * it never reads 0m while the limit is still in force. Absurd timestamps
+ * are skipped.
+ */
+static int fmt_left(const char *win, char *buf, size_t cap) {
+    double reset;
+    if (!get_num(win, "resets_at", &reset) || reset < 0 || reset > 1e11) return 0;
+    double s = reset - (double)time(NULL);
+    long m = s <= 0 ? 0 : (long)((s + 59) / 60);
+    long d = m / 1440, h = m / 60 % 24;
+    if (d)           snprintf(buf, cap, "%ldd%02ldh", d, h);
+    else if (m >= 60) snprintf(buf, cap, "%ldh%02ldm", h, m % 60);
+    else             snprintf(buf, cap, "%ldm", m);
+    return 1;
+}
+
+/* one rate-limit row; win is the object at rate_limits.<window> */
+static void put_limit(const char *win, const char *label) {
+    double raw;
+    get_num(win, "used_percentage", &raw); /* checked by the caller */
+    int p = pct_round(raw);
+    put_label(label);
     put_bar(p, raw, 1);
     if (show_pct) fputs("  ", stdout);
     put_value(p, 3, 1);
-
-    /* skip absurd timestamps: converting them to time_t would be undefined */
-    if (!get_num(win, "resets_at", &reset) || reset < 0 || reset > 1e11) return;
-    time_t t = (time_t)reset, now = time(NULL);
-    struct tm rt, nt;
-    if (!localtime_r(&t, &rt) || !localtime_r(&now, &nt)) return;
     char buf[32];
-    const char *fmt = long_fmt ? "%a %m/%d %H:%M"
-                    : (rt.tm_yday == nt.tm_yday && rt.tm_year == nt.tm_year) ? "%H:%M"
-                    : "%a %H:%M";
-    strftime(buf, sizeof buf, fmt, &rt);
-    printf("%s  ↻ %s%s" RST, P->dim, P->text, buf);
+    if (fmt_left(win, buf, sizeof buf))
+        printf("  %s%5s" RST, P->dim, buf);
+}
+
+/* display width of a UTF-8 string (one cell per code point) */
+static int u8width(const char *s) {
+    int n = 0;
+    for (; *s; s++) n += ((unsigned char)*s & 0xC0) != 0x80;
+    return n;
 }
 
 /* read stdin into a NUL-terminated heap buffer (NULL on failure) */
@@ -361,34 +391,57 @@ int main(int argc, char **argv) {
     char *json = read_all(stdin);
     if (!json) return 1;
 
-    /* line 1: model │ ctx │ effort fast */
+    /*
+     * Two columns:  model   │  context ━━━━───
+     *               effort  │  5h      ━━────   2h05m
+     *               ⚡fast   │  7d      ━━━━━─   3d04h
+     * The left cells stack up, so a missing effort moves ⚡fast up a row.
+     */
     char model[128], effort[32];
     if (!get_str(json, "model.display_name", model, sizeof model)) strcpy(model, "Claude");
-    put_model(model);
-    put_sep();
-    printf("%sctx " RST, P->dim);
-
-    double raw = 0;
-    int has_ctx = get_num(json, "context_window.used_percentage", &raw);
-    int ctx = pct_round(raw);
-    put_bar(ctx, raw, has_ctx);
-    if (!has_ctx)      printf("%s --%s" RST, P->dim, show_pct ? "%" : "");
-    else { if (show_pct) putchar(' '); put_value(ctx, 1, 0); }
-
     int has_eff = get_str(json, "effort.level", effort, sizeof effort);
     int fast = get_true(json, "fast_mode");
-    if (has_eff || fast) put_sep();
-    if (has_eff) put_effort(effort);
-    if (fast) printf("%s%s⚡fast" RST, has_eff ? "  " : "", P->fast);
 
-    /* lines 2–3: rate limits (only when present) */
+    /* rate-limit rows, only for windows that are present */
+    static const char *const WIN[2][2] = { { "five_hour", "5h" }, { "seven_day", "7d" } };
+    const char *lim[2], *lab[2];
+    int nlim = 0;
     const char *rl = get(json, "rate_limits");
-    if (rl) {
-        put_limit(get(rl, "five_hour"), "current", 0);
-        put_limit(get(rl, "seven_day"), "weekly", 1);
+    for (int i = 0; rl && i < 2; i++) {
+        const char *w = get(rl, WIN[i][0]);
+        double tmp;
+        if (w && get_num(w, "used_percentage", &tmp)) { lim[nlim] = w; lab[nlim++] = WIN[i][1]; }
     }
 
-    putchar('\n');
+    /* left column: model, effort, ⚡fast (two cells for ⚡), stacked */
+    enum { L_MODEL, L_EFF, L_FAST };
+    int left[3], lwid[3], nleft = 0;
+    left[nleft] = L_MODEL; lwid[nleft++] = u8width(model);
+    if (has_eff) { left[nleft] = L_EFF;  lwid[nleft++] = (int)strlen(effort); }
+    if (fast)    { left[nleft] = L_FAST; lwid[nleft++] = 6; }
+    int lw = 0;
+    for (int i = 0; i < nleft; i++) if (lwid[i] > lw) lw = lwid[i];
+    int rows = 1 + nlim > nleft ? 1 + nlim : nleft;
+
+    for (int r = 0; r < rows; r++) {
+        int w = 0;
+        if (r < nleft) {
+            if      (left[r] == L_MODEL) put_model(model);
+            else if (left[r] == L_EFF)   put_effort(effort);
+            else                         printf("%s⚡fast" RST, P->fast);
+            w = lwid[r];
+        }
+        if (r > nlim) { putchar('\n'); continue; } /* no gauge on this row */
+        /* Claude Code trims leading whitespace (no-break space included),
+         * so a row with an empty left column starts with U+2800 BRAILLE
+         * PATTERN BLANK: one blank cell that trim() does not count as space */
+        if (w == 0 && lw > 0) { fputs("\xe2\xa0\x80", stdout); w = 1; }
+        printf("%*s", lw - w, "");
+        put_sep();
+        if (r == 0) put_ctx(json);
+        else        put_limit(lim[r - 1], lab[r - 1]);
+        putchar('\n');
+    }
     free(json);
     return 0;
 }
