@@ -2,19 +2,70 @@
 
 **English** | [한국어](README_한국어.md)
 
-A fast, minimal status line for [Claude Code](https://code.claude.com), written in plain C.
-One ~50 KB binary with no dependencies (no `jq`, Node, or Python), and it renders in about 1–2 ms.
-The colors are color-blind friendly, and severity is never shown by color alone.
+A fast, minimal status line theme for [Claude Code](https://code.claude.com), written in plain C: context window and 5-hour/weekly usage bars, with dark, light, and color-blind palettes.
+One ~50 KB binary with no dependencies (no `jq`, Node, or Python at run time). Each run takes about 3 ms, most of it process start-up.
+You pick the palette once at install time, and severity is never shown by color alone.
+
+```
+Opus 5.5  │  ctx ━━━━━───────  │  high  ⚡fast
+current  ━━━━━━━━────   ↻ 17:04
+weekly   ━━━━━━━━━━━─!  ↻ Thu 11/12 15:04
+```
+
+With `--pct`, the percentages are printed too:
 
 ```
 Opus 5.5  │  ctx ━━━━━─────── 42%  │  high  ⚡fast
-current  ━━━━━━━━─────   65%   ↻ 17:04
+current  ━━━━━━━━────   65%   ↻ 17:04
 weekly   ━━━━━━━━━━━─   88%!  ↻ Thu 11/12 15:04
 ```
 
 | Dark terminal | Light terminal (`--light`) |
 |---|---|
 | ![dark preview](docs/preview-dark.png) | ![light preview](docs/preview-light.png) |
+
+## Install
+
+Requires a C compiler and `make` (on macOS: `xcode-select --install`). `python3` is used only to edit `settings.json`; without it, setup prints the line to add yourself.
+
+```sh
+git clone https://github.com/sjlee42/claude-statusline.git
+cd claude-statusline
+make install
+```
+
+`make install` builds the binary and copies it to `~/.claude/statusline`. On first install it asks three questions, shows a preview, and writes the `statusLine` entry to `~/.claude/settings.json` (keeping a `.bak` copy):
+
+1. Terminal background: dark or light
+2. Color-blind friendly palette: yes or no
+3. Percentage numbers next to the bars: yes or no
+
+| Command | What it does |
+|---|---|
+| `git pull && make install` | Update. Only the binary is replaced; your palette is kept. |
+| `make setup` | Choose the palette again. |
+| `make uninstall` | Remove the binary, and the `statusLine` entry if it runs this binary. |
+
+If `CLAUDE_CONFIG_DIR` is set, these use that directory instead of `~/.claude`.
+
+### Manual setup
+
+Add this to `~/.claude/settings.json` with the flags you want:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline --dark"
+  }
+}
+```
+
+| Flag | Effect |
+|---|---|
+| `--dark` (default) / `--light` | palette for a dark or light terminal background |
+| `--cb` | color-blind friendly palette (red-green safe) |
+| `--pct` | also print the percentage next to each bar |
 
 ## What it shows
 
@@ -24,33 +75,31 @@ weekly   ━━━━━━━━━━━─   88%!  ↻ Thu 11/12 15:04
 | 2 | **current**: 5-hour rate-limit usage and reset time |
 | 3 | **weekly**: 7-day rate-limit usage and reset date and time |
 
-- Bars are colored by usage: blue below 50%, orange below 80%, and dark vermillion with a bold `!` marker at 80% and above. See [Color-blind friendly](#color-blind-friendly).
-- The two rate-limit lines share the same layout. They appear only when Claude Code sends rate-limit data (claude.ai Pro/Max subscribers, after the first response of a session). Otherwise only line 1 is shown.
+- Lines 2 and 3 appear only when Claude Code sends rate-limit data (claude.ai Pro/Max subscribers, after the first response of a session).
 - A reset later today shows just the time. A later day adds the weekday.
-- The permission mode (auto, plan, …) is not part of the status line data, and Claude Code already shows it in the footer right below.
+- Missing fields degrade gracefully. For example, early in a session the context shows `--` (`--%` with `--pct`).
 
-## Install
+## Colors
 
-Requires a C compiler (`cc`; on macOS run `xcode-select --install` if you don't have one).
+Each bar is colored by usage. The top band also gets a cue that needs no color.
 
-```sh
-git clone https://github.com/sjlee42/claude-statusline.git
-cd claude-statusline
-make install          # builds and copies the binary to ~/.claude/statusline
-```
+| Usage | Standard | Color-blind (`--cb`) | Extra cue |
+|---|---|---|---|
+| below 20% | blue | blue | — |
+| 20–49% | green | bluish green | — |
+| 50–79% | amber | orange | — |
+| 80% and above | red | vermillion | **bold** `!` after the bar (with `--pct`, a bold number: `88%!`) |
 
-Then add this to `~/.claude/settings.json`:
+- The filled part of a bar is a thick line (`━`) and the empty track is a thin line (`─`), so you can read how full it is even with low color contrast.
+- The model name uses a near-neutral tint per family (Fable, Opus, Sonnet, Haiku), and older generations are muted and not bold. Effort uses the colors of Claude Code's own `/effort` picker (darkened on light terminals).
 
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/statusline"
-  }
-}
-```
+### Color-blind mode (`--cb`)
 
-If your terminal has a light background, use `"~/.claude/statusline --light"`.
+Designed for red-green color blindness (protanopia and deuteranopia), where the standard green, amber, and red are hard to tell apart. The bands follow the Okabe-Ito palette, and neighboring bands also differ in lightness. Effort switches to a purple ramp, so neither the model name nor effort looks like a gauge state.
+
+The image shows the color-blind output (dark and light terminals, with and without `--pct`) next to simulated protanopia and deuteranopia (Machado et al. 2009). At 80% and above, the bold `!` marks the gauge even where orange and vermillion look alike.
+
+![color-blind simulation](docs/colorblind-check.png)
 
 ## Speed
 
@@ -61,24 +110,19 @@ Each run was timed 200 times on a Mac with the same sample payload. The times in
 | **claude-statusline (C)** | **2.8 ms** | 3.4 ms |
 | Equivalent bash + `jq` script | 27.7 ms | 33.2 ms |
 
-Claude Code re-runs the status line command on every update (debounced at 300 ms), so a fast start-up matters more than anything else. Runtimes launched through `npx` are the slowest case: ccstatusline's README measured about 1.1 s per repaint with `npx`.
+Claude Code re-runs the status line command on every update (debounced at 300 ms), so start-up time matters more than anything else.
 
-## Does it use tokens or context?
+## FAQ
 
-No. The status line runs locally, and its output is only drawn on screen, never sent to the model. See the [official docs](https://code.claude.com/docs/en/statusline).
+**Does it use tokens or context?** No. The status line runs locally, and its output is only drawn on screen, never sent to the model. See the [official docs](https://code.claude.com/docs/en/statusline).
 
-## How it works
+**Why not show the permission mode (auto, plan, …)?** It is not part of the status line data, and Claude Code already shows it in the footer right below.
 
-`statusline.c` reads the JSON payload Claude Code writes to stdin and pulls out these fields with a small purpose-built JSON path lookup:
+**Which fields does it read?** `model.display_name`, `context_window.used_percentage`, `effort.level`, `fast_mode`, and `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`, using a small purpose-built JSON lookup in `statusline.c`.
 
-`model.display_name`, `context_window.used_percentage`, `effort.level`, `fast_mode`,
-`rate_limits.five_hour.{used_percentage,resets_at}`, `rate_limits.seven_day.{used_percentage,resets_at}`
+## Other Claude Code status lines
 
-Missing or `null` fields are handled. For example, early in a session the context shows `--%`.
-
-## Other Claude Code status lines worth a look
-
-Before building this, we surveyed popular and recently updated status line projects on GitHub. If you want more features, themes, or a visual editor, these are great choices. Star counts were checked on 2026-11-09.
+If you want more features, themes, or a visual editor, these are great choices. Star counts were checked on 2026-11-09.
 
 | Project | ★ | Language | Highlights |
 |---|---|---|---|
@@ -96,24 +140,6 @@ Before building this, we surveyed popular and recently updated status line proje
 Also see [ccusage](https://github.com/ccusage/ccusage) (★19.4k), a usage and cost analysis tool that also offers a status line mode.
 
 **Why another one?** We wanted the readability of the dot-gauge design, with a cleaner single style for every bar, native speed, and zero dependencies, all in a file small enough to read in one sitting.
-
-## Color-blind friendly
-
-The default palettes are designed for red-green color blindness (protanopia and deuteranopia), and severity never relies on color alone.
-
-| Usage | Color | Extra cue (no color needed) |
-|---|---|---|
-| below 50% | blue | — |
-| 50–79% | orange | — |
-| 80% and above | dark vermillion | **bold** number and a `!` marker (`88%!`) |
-
-- The filled part of a bar is a thick line (`━`) and the empty track is a thin line (`─`), so you can read how full it is even with low color contrast.
-- The model name and effort use neutral colors so they are never mistaken for a gauge state.
-- Every gauge also prints its exact percentage.
-
-The image below shows the output in both palettes next to simulated protanopia and deuteranopia (Machado et al. 2009 model). Blue and orange stay clearly distinct. Orange and vermillion are told apart by brightness, bold text, and the `!` marker.
-
-![color-blind simulation](docs/colorblind-check.png)
 
 ## License
 

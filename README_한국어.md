@@ -2,19 +2,70 @@
 
 [English](README.md) | **한국어**
 
-[Claude Code](https://code.claude.com)용으로 C로 만든 빠르고 가벼운 statusline입니다.
-약 50KB짜리 바이너리 하나이고, jq·Node·Python 같은 의존성이 없습니다. 한 번 그리는 데 1~2ms 정도 걸립니다.
-색맹 친화 색상을 쓰고, 상태를 색만으로 표시하지 않습니다.
+[Claude Code](https://code.claude.com)용으로 C로 만든 빠르고 가벼운 statusline 테마입니다. 컨텍스트와 5시간·주간 사용량을 바로 보여주고, 어두운·밝은·색맹 친화 팔레트를 제공합니다.
+약 50KB짜리 바이너리 하나이고, 실행할 때 jq·Node·Python 같은 의존성이 없습니다. 한 번 실행에 약 3ms가 걸리며, 대부분은 프로세스 시작 시간입니다.
+팔레트는 설치할 때 한 번 고르며, 상태를 색만으로 표시하지 않습니다.
+
+```
+Opus 5.5  │  ctx ━━━━━───────  │  high  ⚡fast
+current  ━━━━━━━━────   ↻ 17:04
+weekly   ━━━━━━━━━━━─!  ↻ Thu 11/12 15:04
+```
+
+`--pct`를 붙이면 퍼센트 숫자도 함께 표시합니다.
 
 ```
 Opus 5.5  │  ctx ━━━━━─────── 42%  │  high  ⚡fast
-current  ━━━━━━━━─────   65%   ↻ 17:04
+current  ━━━━━━━━────   65%   ↻ 17:04
 weekly   ━━━━━━━━━━━─   88%!  ↻ Thu 11/12 15:04
 ```
 
 | 어두운 터미널 | 밝은 터미널 (`--light`) |
 |---|---|
 | ![dark preview](docs/preview-dark.png) | ![light preview](docs/preview-light.png) |
+
+## 설치
+
+C 컴파일러와 `make`가 필요합니다(macOS: `xcode-select --install`). `python3`는 `settings.json`을 수정할 때만 쓰며, 없으면 직접 추가할 줄을 출력합니다.
+
+```sh
+git clone https://github.com/sjlee42/claude-statusline.git
+cd claude-statusline
+make install
+```
+
+`make install`은 바이너리를 빌드해 `~/.claude/statusline`으로 복사합니다. 처음 설치할 때는 세 가지를 묻고 미리보기를 보여준 뒤, `~/.claude/settings.json`에 `statusLine` 항목을 저장합니다(`.bak` 백업을 남깁니다).
+
+1. 터미널 배경: 어두움 또는 밝음
+2. 색맹 친화 팔레트: 사용 여부
+3. 바 옆 퍼센트 숫자: 표시 여부
+
+| 명령 | 하는 일 |
+|---|---|
+| `git pull && make install` | 업데이트. 바이너리만 교체하고 팔레트 설정은 유지합니다. |
+| `make setup` | 팔레트를 다시 고릅니다. |
+| `make uninstall` | 바이너리를 지우고, `statusLine` 항목이 이 바이너리를 실행하면 그 항목도 지웁니다. |
+
+`CLAUDE_CONFIG_DIR`가 설정되어 있으면 `~/.claude` 대신 그 디렉터리를 씁니다.
+
+### 직접 설정
+
+`~/.claude/settings.json`에 원하는 옵션을 붙여 추가합니다.
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline --dark"
+  }
+}
+```
+
+| 옵션 | 효과 |
+|---|---|
+| `--dark` (기본) / `--light` | 어두운·밝은 터미널 배경용 팔레트 |
+| `--cb` | 색맹 친화 팔레트 (적록색맹 대응) |
+| `--pct` | 바 옆에 퍼센트 숫자도 표시 |
 
 ## 표시 내용
 
@@ -24,33 +75,31 @@ weekly   ━━━━━━━━━━━─   88%!  ↻ Thu 11/12 15:04
 | 2 | **current**: 5시간 사용량과 리셋 시각 |
 | 3 | **weekly**: 7일 사용량과 리셋 날짜·시각 |
 
-- 바 색은 사용률 50% 미만이면 파랑, 80% 미만이면 주황, 그 이상이면 진한 주홍이고 굵은 `!` 표시가 붙습니다. [색맹 친화 디자인](#색맹-친화-디자인)을 참고하세요.
-- current와 weekly는 같은 형식입니다. Claude Code가 rate limit 정보를 넘겨줄 때만 표시되고(claude.ai Pro/Max 구독, 세션의 첫 응답 이후), 정보가 없으면 첫 줄만 나옵니다.
+- 2·3번째 줄은 Claude Code가 rate limit 정보를 넘겨줄 때만 표시됩니다(claude.ai Pro/Max 구독, 세션의 첫 응답 이후).
 - 리셋이 오늘이면 시각만, 다른 날이면 요일까지 표시합니다.
-- 권한 모드(auto, plan 등)는 statusline이 받는 데이터에 없습니다. Claude Code가 바로 아래 기본 표시줄에 이미 보여줍니다.
+- 필드가 없어도 문제없이 표시합니다. 예를 들어 세션 초반에는 컨텍스트가 `--`(`--pct`면 `--%`)로 표시됩니다.
 
-## 설치
+## 색
 
-C 컴파일러(`cc`)가 필요합니다. macOS에서 컴파일러가 없다면 `xcode-select --install`을 실행하세요.
+바 색은 사용률에 따라 바뀌고, 가장 높은 구간에는 색 없이도 알 수 있는 표시가 붙습니다.
 
-```sh
-git clone https://github.com/sjlee42/claude-statusline.git
-cd claude-statusline
-make install          # 빌드한 뒤 ~/.claude/statusline 으로 복사
-```
+| 사용률 | 기본 | 색맹 친화 (`--cb`) | 추가 단서 |
+|---|---|---|---|
+| 20% 미만 | 파랑 | 파랑 | — |
+| 20~49% | 초록 | 청록 | — |
+| 50~79% | 주황(앰버) | 주황 | — |
+| 80% 이상 | 빨강 | 주홍 | 바 뒤에 **굵은** `!` (`--pct`면 굵은 숫자: `88%!`) |
 
-그다음 `~/.claude/settings.json`에 아래를 추가합니다.
+- 바의 채운 부분은 굵은 선(`━`), 빈 부분은 얇은 선(`─`)이라 색 대비가 약해도 얼마나 찼는지 보입니다.
+- 모델명은 계열(Fable, Opus, Sonnet, Haiku)마다 거의 무채색에 가까운 은은한 색을 쓰고, 이전 세대는 흐리고 굵지 않게 표시합니다. effort는 Claude Code의 `/effort` 선택 화면과 같은 색입니다(밝은 터미널에서는 더 진하게).
 
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/statusline"
-  }
-}
-```
+### 색맹 친화 모드 (`--cb`)
 
-터미널 배경이 밝다면 `"~/.claude/statusline --light"`로 쓰세요.
+적록색맹(제1·제2색맹)을 위한 팔레트입니다. 기본 팔레트의 초록·주황·빨강은 적록색맹이면 구분하기 어렵기 때문입니다. 구간 색은 Okabe-Ito 팔레트를 따르고, 이웃한 구간은 밝기도 다릅니다. effort는 보라 계열로 바뀌어서 모델명과 effort 모두 게이지 상태로 오해되지 않습니다.
+
+아래 이미지는 색맹 친화 팔레트의 출력(어두운·밝은 터미널, `--pct` 없이와 있이)을 제1색맹·제2색맹 시뮬레이션(Machado et al. 2009)과 나란히 보여줍니다. 80% 이상은 주황과 주홍이 비슷해 보이는 경우에도 굵은 `!` 표시로 알 수 있습니다.
+
+![색맹 시뮬레이션](docs/colorblind-check.png)
 
 ## 속도
 
@@ -61,24 +110,19 @@ Mac에서 같은 예시 입력으로 200회씩 실행해 측정했습니다. 측
 | **claude-statusline (C)** | **2.8 ms** | 3.4 ms |
 | 같은 기능의 bash + `jq` 스크립트 | 27.7 ms | 33.2 ms |
 
-Claude Code는 화면이 갱신될 때마다(300ms 디바운스) statusline 명령을 다시 실행하므로 시작 속도가 가장 중요합니다. `npx`로 실행하는 방식이 가장 느립니다. ccstatusline README에 따르면 `npx`로 실행하면 한 번 그리는 데 약 1.1초가 걸립니다.
+Claude Code는 화면이 갱신될 때마다(300ms 디바운스) statusline 명령을 다시 실행하므로 시작 속도가 가장 중요합니다.
 
-## 토큰이나 컨텍스트를 쓰나요?
+## 자주 묻는 질문
 
-아니요. statusline은 로컬에서 실행되고, 출력은 화면에만 그려질 뿐 모델에 전달되지 않습니다. [공식 문서](https://code.claude.com/docs/en/statusline)를 참고하세요.
+**토큰이나 컨텍스트를 쓰나요?** 아니요. statusline은 로컬에서 실행되고, 출력은 화면에만 그려질 뿐 모델에 전달되지 않습니다. [공식 문서](https://code.claude.com/docs/en/statusline)를 참고하세요.
 
-## 동작 방식
+**권한 모드(auto, plan 등)는 왜 표시하지 않나요?** statusline이 받는 데이터에 없고, Claude Code가 바로 아래 기본 표시줄에 이미 보여줍니다.
 
-`statusline.c`는 Claude Code가 stdin으로 넘겨주는 JSON에서 작은 전용 파서로 다음 필드만 읽습니다.
-
-`model.display_name`, `context_window.used_percentage`, `effort.level`, `fast_mode`,
-`rate_limits.five_hour.{used_percentage,resets_at}`, `rate_limits.seven_day.{used_percentage,resets_at}`
-
-필드가 없거나 `null`이어도 처리합니다. 예를 들어 세션 초반에는 컨텍스트가 `--%`로 표시됩니다.
+**어떤 필드를 읽나요?** `model.display_name`, `context_window.used_percentage`, `effort.level`, `fast_mode`, `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`입니다. `statusline.c` 안의 작은 전용 JSON 조회 함수로 읽습니다.
 
 ## 함께 볼 만한 Claude Code statusline
 
-이 프로젝트를 만들기 전에 GitHub에서 인기 있고 최근까지 업데이트된 statusline 프로젝트들을 조사했습니다. 더 많은 기능이나 테마, 시각적 편집기가 필요하다면 아래 프로젝트들도 좋은 선택입니다. 별 수는 2026-11-09 기준입니다.
+더 많은 기능이나 테마, 시각적 편집기가 필요하다면 아래 프로젝트들도 좋은 선택입니다. 별 수는 2026-11-09 기준입니다.
 
 | 프로젝트 | ★ | 언어 | 특징 |
 |---|---|---|---|
@@ -96,24 +140,6 @@ Claude Code는 화면이 갱신될 때마다(300ms 디바운스) statusline 명�
 [ccusage](https://github.com/ccusage/ccusage)(★19.4k)도 참고할 만합니다. 사용량·비용 분석 도구인데 statusline 모드도 제공합니다.
 
 **왜 또 하나를 만들었나요?** 점 게이지 디자인의 가독성은 살리면서 모든 바를 하나의 깔끔한 스타일로 통일하고, 네이티브 속도와 의존성 0을 원했습니다. 한 번에 다 읽을 수 있을 만큼 작은 파일 하나로요.
-
-## 색맹 친화 디자인
-
-기본 팔레트는 적록색맹(제1·제2색맹)을 고려해 만들었고, 상태를 색만으로 구분하지 않습니다.
-
-| 사용률 | 색 | 색 없이도 알 수 있는 단서 |
-|---|---|---|
-| 50% 미만 | 파랑 | — |
-| 50~79% | 주황 | — |
-| 80% 이상 | 진한 주홍 | **굵은** 숫자와 `!` 표시 (`88%!`) |
-
-- 바의 채운 부분은 굵은 선(`━`), 빈 부분은 얇은 선(`─`)이라 색 대비가 약해도 얼마나 찼는지 보입니다.
-- 모델명과 effort는 게이지 색과 겹치지 않는 중립 색을 씁니다.
-- 모든 게이지에 정확한 % 숫자가 함께 표시됩니다.
-
-아래 이미지는 두 팔레트의 출력을 제1색맹·제2색맹 시뮬레이션(Machado et al. 2009 모델)과 나란히 보여줍니다. 파랑과 주황은 뚜렷하게 구분되고, 주황과 주홍은 밝기 차이와 굵은 글씨, `!` 표시로 구분됩니다.
-
-![색맹 시뮬레이션](docs/colorblind-check.png)
 
 ## 라이선스
 
