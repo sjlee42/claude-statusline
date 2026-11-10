@@ -54,8 +54,8 @@ typedef struct {
     const char *model, *dim, *sep, *empty, *text, *eff, *fast; /* model/eff: fallbacks */
     const EffortColors *effc;
     const ModelTints *tint;
-    const char *num[NBAND]; /* percentage numbers; also the bar in option 1 */
-    const char *bar[NBAND]; /* bar fill in option 2 (never bold) */
+    const char *num[NBAND]; /* percentage numbers; also the bar when it has no number */
+    const char *bar[NBAND]; /* bar fill when a number follows (never bold) */
 } Palette;
 
 /*
@@ -132,7 +132,7 @@ static const Palette LIGHT_CB = {
     .bar = { ESC(26), ESC(36), ESC(172), ESC(124) },
 };
 static const Palette *P = &DARK;
-static int show_pct = 0; /* --pct: option 2, print numbers next to the bars */
+static int show_pct = 0; /* --pct: also print numbers next to the 5h and 7d bars (context always has one) */
 
 #define BAR_CELLS 12
 #define MAX_INPUT (1 << 20) /* the payload is a few KB; never buffer more than this */
@@ -289,16 +289,16 @@ static void put_effort(const char *e) {
 }
 
 /*
- * Option 2 (--pct): bar in the deep bar[] shade, followed by the number.
- * Option 1 (default): no number, so the bar takes the number color instead,
- * with bold switched off (\033[22m) because the bar is never bold.
+ * With a number (context always; 5h/7d with --pct): bar in the deep bar[]
+ * shade, followed by the number. Without one (5h/7d by default): the bar
+ * takes the number color instead, with bold switched off (\033[22m) because the bar is never bold.
  * raw > 0 always fills at least one cell, so any usage shows.
  */
-static void put_bar(const Gauge *g, int p, double raw, int known) {
+static void put_bar(const Gauge *g, int p, double raw, int known, int num) {
     int filled = known ? (p * BAR_CELLS + 50) / 100 : 0;
     if (known && raw > 0 && filled == 0) filled = 1;
     if (filled) {
-        if (show_pct) fputs(P->bar[band(g, p)], stdout);
+        if (num) fputs(P->bar[band(g, p)], stdout);
         else        { fputs(P->num[band(g, p)], stdout); fputs("\033[22m", stdout); }
         for (int i = 0; i < filled; i++) fputs("━", stdout);
     }
@@ -307,9 +307,9 @@ static void put_bar(const Gauge *g, int p, double raw, int known) {
     fputs(RST, stdout);
 }
 
-/* the number (option 2) or, in option 1, a bold "!" after the bar when extreme */
-static void put_value(const Gauge *g, int p, int width, int pad) {
-    if (show_pct)     put_pct(g, p, width, pad);
+/* the number or, without one, a bold "!" after the bar when extreme */
+static void put_value(const Gauge *g, int p, int width, int pad, int num) {
+    if (num)     put_pct(g, p, width, pad);
     else if (p >= g->bang) printf("%s!" RST, P->num[HIGH]);
     else if (pad)     putchar(' ');
 }
@@ -323,10 +323,10 @@ static void put_ctx(const char *json) {
     int has = get_num(json, "context_window.used_percentage", &raw);
     int p = pct_round(raw);
     put_label("context");
-    put_bar(&G_CTX, p, raw, has);
-    if (show_pct) fputs("  ", stdout);
-    if (!has) printf("%s%s" RST, P->dim, show_pct ? " --%" : " --");
-    else      put_value(&G_CTX, p, 3, 0);
+    put_bar(&G_CTX, p, raw, has, 1);
+    fputs("  ", stdout);
+    if (!has) printf("%s --%%" RST, P->dim);
+    else      put_value(&G_CTX, p, 3, 0, 1);
 }
 
 /*
@@ -352,9 +352,9 @@ static void put_limit(const Gauge *g, const char *win, const char *label) {
     get_num(win, "used_percentage", &raw); /* checked by the caller */
     int p = pct_round(raw);
     put_label(label);
-    put_bar(g, p, raw, 1);
+    put_bar(g, p, raw, 1, show_pct);
     if (show_pct) fputs("  ", stdout);
-    put_value(g, p, 3, 1);
+    put_value(g, p, 3, 1, show_pct);
     char buf[32];
     if (fmt_left(win, buf, sizeof buf))
         printf("  %s%5s" RST, P->dim, buf);

@@ -7,12 +7,12 @@ One ~50 KB binary with no dependencies (no `jq`, Node, or Python at run time). E
 You pick the palette once at install time.
 
 ```
-Opus 5.5  │  context ━━━━━───────
+Opus 5.5  │  context ━━━━━───────   42%
 high      │  5h      ━━━━━━━━────   2h05m
 ⚡fast    │  7d      ━━━━━━━━━━━─!  3d04h
 ```
 
-With `--pct`, the percentages are printed too:
+The context bar always shows its percentage. With `--pct`, the 5h and 7d bars show theirs too:
 
 ```
 Opus 5.5  │  context ━━━━━───────   42%
@@ -65,7 +65,7 @@ Add this to `~/.claude/settings.json` with the flags you want:
 |---|---|
 | `--dark` (default) / `--light` | palette for a dark or light terminal background |
 | `--cb` | color-blind friendly palette (red-green safe) |
-| `--pct` | also print the percentage next to each bar |
+| `--pct` | also print the percentage next to the 5h and 7d bars (context always has one) |
 
 ## What it shows
 
@@ -76,11 +76,11 @@ Add this to `~/.claude/settings.json` with the flags you want:
 
 - The 5h and 7d bars appear only when Claude Code sends rate-limit data (claude.ai Pro/Max subscribers, after the first response of a session).
 - The time left is `42m` under an hour, `2h05m` under a day, and `3d04h` beyond that.
-- Missing fields degrade gracefully. For example, early in a session the context shows `--` (`--%` with `--pct`).
+- Missing fields degrade gracefully. For example, early in a session the context shows `--%`.
 
 ## Colors
 
-Each bar is colored by usage, and each gauge has its own thresholds. Context quality drops early, so it warns early. The 5h and 7d limits reset on their own and leave room, so they warn later, and a **bold** `!` appears only when the limit is nearly used up (with `--pct`, after the number: `98%!`).
+Each bar is colored by usage, and each gauge has its own thresholds. Context quality drops early, so it warns early. The 5h and 7d limits reset on their own and leave room, so they warn later, and a **bold** `!` appears only when the limit is nearly used up (on a bar with a number, after the number: `98%!`).
 
 | Band | Standard | Color-blind (`--cb`) | context | 5h | 7d |
 |---|---|---|---|---|---|

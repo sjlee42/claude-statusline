@@ -106,7 +106,7 @@ case "$REPLY" in 2|l|light) BG=--light ;; *) BG=--dark ;; esac
 ask "2) Color-blind friendly palette / 색맹 친화 팔레트? [y/N]:" n
 case "$REPLY" in y|Y|yes) CB=" --cb" ;; *) CB="" ;; esac
 
-ask "3) Show percentage numbers / 퍼센트 숫자 표시? [y/N]:" n
+ask "3) Show percentages on 5h/7d too / 5h·7d에도 퍼센트 숫자 표시? (context always shows / context는 항상 표시) [y/N]:" n
 case "$REPLY" in y|Y|yes) PCT=" --pct" ;; *) PCT="" ;; esac
 
 FLAGS="$BG$CB$PCT"
