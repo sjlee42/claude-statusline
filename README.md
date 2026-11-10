@@ -4,7 +4,7 @@
 
 A fast, minimal status line theme for [Claude Code](https://code.claude.com), written in plain C: context window and 5-hour/weekly usage bars, with dark, light, and color-blind palettes.
 One ~50 KB binary with no dependencies (no `jq`, Node, or Python at run time). Each run takes about 3 ms, most of it process start-up.
-You pick the palette once at install time, and severity is never shown by color alone.
+You pick the palette once at install time.
 
 ```
 Opus 5.5  │  context ━━━━━───────
@@ -80,14 +80,15 @@ Add this to `~/.claude/settings.json` with the flags you want:
 
 ## Colors
 
-Each bar is colored by usage. The top band also gets a cue that needs no color.
+Each bar is colored by usage, and each gauge has its own thresholds. Context quality drops early, so it warns early. The 5h and 7d limits reset on their own and leave room, so they warn later, and a **bold** `!` appears only when the limit is nearly used up (with `--pct`, after the number: `98%!`).
 
-| Usage | Standard | Color-blind (`--cb`) | Extra cue |
-|---|---|---|---|
-| below 20% | blue | blue | — |
-| 20–49% | green | bluish green | — |
-| 50–79% | amber | orange | — |
-| 80% and above | red | vermillion | **bold** `!` after the bar (with `--pct`, a bold number: `88%!`) |
+| Band | Standard | Color-blind (`--cb`) | context | 5h | 7d |
+|---|---|---|---|---|---|
+| 1 | blue | blue | below 20% | below 40% | below 50% |
+| 2 | green | bluish green | 20–49% | 40–69% | 50–79% |
+| 3 | amber | orange | 50–79% | 70–89% | 80–94% |
+| 4 | red | vermillion | 80% and above | 90% and above | 95% and above |
+| `!` | | | 80% and above | 98% and above | 99% and above |
 
 - The filled part of a bar is a thick line (`━`) and the empty track is a thin line (`─`), so you can read how full it is even with low color contrast.
 - The model name uses a near-neutral tint per family (Fable, Opus, Sonnet, Haiku), and older generations are muted and not bold. Effort uses the colors of Claude Code's own `/effort` picker (darkened on light terminals).
@@ -96,7 +97,7 @@ Each bar is colored by usage. The top band also gets a cue that needs no color.
 
 Designed for red-green color blindness (protanopia and deuteranopia), where the standard green, amber, and red are hard to tell apart. The bands follow the Okabe-Ito palette, and neighboring bands also differ in lightness. Effort switches to a purple ramp, so neither the model name nor effort looks like a gauge state.
 
-The image shows the color-blind output (dark and light terminals, with and without `--pct`) next to simulated protanopia and deuteranopia (Machado et al. 2009). At 80% and above, the bold `!` marks the gauge even where orange and vermillion look alike.
+The image shows the color-blind output (dark and light terminals, with and without `--pct`) next to simulated protanopia and deuteranopia (Machado et al. 2009). The top two bands also differ in lightness, so orange and vermillion stay apart.
 
 ![color-blind simulation](docs/colorblind-check.png)
 

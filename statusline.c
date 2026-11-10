@@ -38,9 +38,17 @@ typedef struct { const char *low, *medium, *high, *xhigh, *max; } EffortColors;
 static const char *const FAMILY[NFAMILY] = { "Fable", "Opus", "Sonnet", "Haiku" };
 typedef struct { const char *cur[NFAMILY], *old[NFAMILY]; } ModelTints;
 
-/* gauge bands, indexed by band(): < 20 / < 50 / < 80 / >= CRIT */
-#define CRIT 80
+/*
+ * Gauge bands, indexed by band(): < t[0] / < t[1] / < t[2] / >= t[2] (HIGH).
+ * bang is where the bold "!" starts. Each gauge has its own thresholds:
+ * context degrades early, while the rate limits reset on their own and
+ * leave room, so they warn later and use "!" only when nearly exhausted.
+ */
 enum { LOW, OK, WARN, HIGH, NBAND };
+typedef struct { int t[3], bang; } Gauge;
+static const Gauge G_CTX = { { 20, 50, 80 }, 80 };
+static const Gauge G_5H  = { { 40, 70, 90 }, 98 };
+static const Gauge G_7D  = { { 50, 80, 95 }, 99 };
 
 typedef struct {
     const char *model, *dim, *sep, *empty, *text, *eff, *fast; /* model/eff: fallbacks */
@@ -86,7 +94,7 @@ static const ModelTints TINT_LIGHT = {
 
 /*
  * Gauges, standard palette:
- *   < 20% blue  ·  < 50% green  ·  < 80% amber  ·  >= 80% red + bold + "!"
+ *   4 bands: blue · green · amber · red (bold number). Thresholds per gauge (G_CTX/G_5H/G_7D).
  * Two tones per band, same hue. Bars are the saturated shade; numbers are a
  * muted, low-chroma shade that is easy on the eyes (dark: lighter, >= 6:1;
  * light: darker, >= 4.5:1 except the top band, which is bold).
@@ -106,11 +114,10 @@ static const Palette LIGHT = {
 
 /*
  * Color-blind palette (--cb), Okabe-Ito based:
- *   < 20% blue  ·  < 50% bluish green  ·  < 80% orange  ·  >= 80% vermillion + bold + "!"
+ *   4 bands: blue · bluish green · orange · vermillion (bold number).
  * Checked with a Machado 2009 protan/deutan simulation: neighboring bands stay
- * apart, and the top two bands also differ in lightness. Severity never relies
- * on hue alone: >= 80% also gets bold and "!", and the filled bar (━) differs
- * in shape from its track (─).
+ * apart, and the top two bands also differ in lightness. The filled bar (━)
+ * differs in shape from its track (─).
  */
 static const Palette DARK_CB = {
     .model = BOLD(255), .dim = ESC(245), .sep = ESC(240), .empty = ESC(240), .text = ESC(252),
@@ -245,11 +252,13 @@ static int get_true(const char *root, const char *path) {
 /* Percentages are rounded once, so the number, its color and "!" always agree. */
 static int pct_round(double p) { return p <= 0 ? 0 : p >= 100 ? 100 : (int)(p + 0.5); }
 
-static int band(int p) { return p < 20 ? LOW : p < 50 ? OK : p < CRIT ? WARN : HIGH; }
+static int band(const Gauge *g, int p) {
+    return p < g->t[0] ? LOW : p < g->t[1] ? OK : p < g->t[2] ? WARN : HIGH;
+}
 
-/* percentage with a non-color severity cue: "!" at >= CRIT, padded otherwise */
-static void put_pct(int p, int width, int pad) {
-    printf("%s%*d%%%s" RST, P->num[band(p)], width, p, p >= CRIT ? "!" : (pad ? " " : ""));
+/* percentage; "!" at >= g->bang, padded otherwise */
+static void put_pct(const Gauge *g, int p, int width, int pad) {
+    printf("%s%*d%%%s" RST, P->num[band(g, p)], width, p, p >= g->bang ? "!" : (pad ? " " : ""));
 }
 
 /*
@@ -285,12 +294,12 @@ static void put_effort(const char *e) {
  * with bold switched off (\033[22m) because the bar is never bold.
  * raw > 0 always fills at least one cell, so any usage shows.
  */
-static void put_bar(int p, double raw, int known) {
+static void put_bar(const Gauge *g, int p, double raw, int known) {
     int filled = known ? (p * BAR_CELLS + 50) / 100 : 0;
     if (known && raw > 0 && filled == 0) filled = 1;
     if (filled) {
-        if (show_pct) fputs(P->bar[band(p)], stdout);
-        else        { fputs(P->num[band(p)], stdout); fputs("\033[22m", stdout); }
+        if (show_pct) fputs(P->bar[band(g, p)], stdout);
+        else        { fputs(P->num[band(g, p)], stdout); fputs("\033[22m", stdout); }
         for (int i = 0; i < filled; i++) fputs("━", stdout);
     }
     fputs(P->empty, stdout);
@@ -298,10 +307,10 @@ static void put_bar(int p, double raw, int known) {
     fputs(RST, stdout);
 }
 
-/* the number (option 2) or option 1's non-color cue: bold "!" after the bar */
-static void put_value(int p, int width, int pad) {
-    if (show_pct)     put_pct(p, width, pad);
-    else if (p >= CRIT) printf("%s!" RST, P->num[HIGH]);
+/* the number (option 2) or, in option 1, a bold "!" after the bar when extreme */
+static void put_value(const Gauge *g, int p, int width, int pad) {
+    if (show_pct)     put_pct(g, p, width, pad);
+    else if (p >= g->bang) printf("%s!" RST, P->num[HIGH]);
     else if (pad)     putchar(' ');
 }
 
@@ -314,10 +323,10 @@ static void put_ctx(const char *json) {
     int has = get_num(json, "context_window.used_percentage", &raw);
     int p = pct_round(raw);
     put_label("context");
-    put_bar(p, raw, has);
+    put_bar(&G_CTX, p, raw, has);
     if (show_pct) fputs("  ", stdout);
     if (!has) printf("%s%s" RST, P->dim, show_pct ? " --%" : " --");
-    else      put_value(p, 3, 0);
+    else      put_value(&G_CTX, p, 3, 0);
 }
 
 /*
@@ -338,14 +347,14 @@ static int fmt_left(const char *win, char *buf, size_t cap) {
 }
 
 /* one rate-limit row; win is the object at rate_limits.<window> */
-static void put_limit(const char *win, const char *label) {
+static void put_limit(const Gauge *g, const char *win, const char *label) {
     double raw;
     get_num(win, "used_percentage", &raw); /* checked by the caller */
     int p = pct_round(raw);
     put_label(label);
-    put_bar(p, raw, 1);
+    put_bar(g, p, raw, 1);
     if (show_pct) fputs("  ", stdout);
-    put_value(p, 3, 1);
+    put_value(g, p, 3, 1);
     char buf[32];
     if (fmt_left(win, buf, sizeof buf))
         printf("  %s%5s" RST, P->dim, buf);
@@ -439,7 +448,7 @@ int main(int argc, char **argv) {
         printf("%*s", lw - w, "");
         put_sep();
         if (r == 0) put_ctx(json);
-        else        put_limit(lim[r - 1], lab[r - 1]);
+        else        put_limit(r == 1 ? &G_5H : &G_7D, lim[r - 1], lab[r - 1]);
         putchar('\n');
     }
     free(json);
