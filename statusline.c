@@ -289,8 +289,8 @@ static void put_effort(const char *e) {
 }
 
 /*
- * With a number (context always; 5h/7d with --pct): bar in the deep bar[]
- * shade, followed by the number. Without one (5h/7d by default): the bar
+ * With --pct (all three bars alike): bar in the deep bar[]
+ * shade, followed by the number. Without --pct (default): the bar
  * takes the number color instead, with bold switched off (\033[22m) because the bar is never bold.
  * raw > 0 always fills at least one cell, so any usage shows.
  */
@@ -323,7 +323,7 @@ static void put_ctx(const char *json) {
     int has = get_num(json, "context_window.used_percentage", &raw);
     int p = pct_round(raw);
     put_label("context");
-    put_bar(&G_CTX, p, raw, has, 1);
+    put_bar(&G_CTX, p, raw, has, show_pct);
     fputs("  ", stdout);
     if (!has) printf("%s --%%" RST, P->dim);
     else      put_value(&G_CTX, p, 3, 0, 1);
