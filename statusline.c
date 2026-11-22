@@ -1,382 +1,583 @@
 /*
- * Claude Code statusline — fast, dependency-free C.
+ * Claude Code statusline: fast, dependency-free C.
  *
- *   Opus 5.5  │  context ━━━━━───────
- *   high      │  5h      ━━━━━━━━────   2h05m
- *   ⚡fast     │  7d      ━━━━━━━━━━━─!  3d04h
+ *   Opus 5.5 | high | main* | 42% | 5h 23% (1h12m) | 7d 41% (3d4h)
+ *   ▸ 14:20 Add dark mode to the settings page
+ *   └ ~/projects/my-app
  *
- * Reads the statusLine JSON payload on stdin and prints up to three lines in two
- * columns: model and effort on the left, three aligned gauges on the right.
- * The flags are chosen once at install time (setup.sh writes them into the
- * statusLine command in ~/.claude/settings.json).
- * Build: cc -O2 -o statusline statusline.c
+ * The last prompt is found by reading the transcript backward from its end,
+ * stopping at the first match, so the cost does not grow with session length.
+ * git runs at most once, and only inside a repository, alongside that scan.
+ * Everything that gets drawn is untrusted and goes through text_add().
  */
+#if defined(__linux__)
+#define _GNU_SOURCE /* timegm, posix_spawn */
+#endif
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
-static const char USAGE[] =
-    "usage: statusline [--dark | --light] [--cb] [--pct] < payload.json\n"
-    "  --dark   palette for dark terminal backgrounds (default)\n"
-    "  --light  palette for light terminal backgrounds\n"
-    "  --cb     color-blind friendly palette (red-green safe)\n"
-    "  --pct    also print the percentage numbers (default: gauges only)\n";
+extern char **environ;
 
-/* ---------- palettes (dark/light × standard/color-blind) ---------- */
-#define ESC(n) "\033[38;5;" #n "m"
-#define BOLD(n) "\033[1;38;5;" #n "m"
-#define RST    "\033[0m"
-#define RGB(r, g, b) "\033[38;2;" #r ";" #g ";" #b "m"      /* 24-bit truecolor */
-#define BRGB(r, g, b) "\033[1;38;2;" #r ";" #g ";" #b "m"
+#define FG(n) "\033[38;5;" #n "m"
+#define RST "\033[0m"
+#define DIM FG(245)
+#define SEP FG(240)
+#define YELLOW FG(179)
+#define PURPLE FG(147)
+#define BLUE FG(110)
+#define GREEN FG(114)
+#define RED FG(203)
 
-/* effort level colors; max is a full pre-colored "max" (one hue per letter) */
-typedef struct { const char *low, *medium, *high, *xhigh, *max; } EffortColors;
+#define MAX_PAYLOAD (1 << 20)      /* the payload is a few KB */
+#define CHUNK (64 * 1024)          /* transcript read size */
+#define MAX_LINE (8 * 1024 * 1024) /* longer transcript lines are skipped */
+#define MAX_SCAN (64 * 1024 * 1024) /* stop looking for a prompt after this */
+#define PROMPT_CHARS 60
+#define GIT_TIMEOUT 5 /* seconds */
 
-/* model name tints, indexed like FAMILY: current generation (bold) / legacy */
-#define NFAMILY 4
-static const char *const FAMILY[NFAMILY] = { "Fable", "Opus", "Sonnet", "Haiku" };
-typedef struct { const char *cur[NFAMILY], *old[NFAMILY]; } ModelTints;
-
-/*
- * Gauge bands, indexed by band(): < t[0] / < t[1] / < t[2] / >= t[2] (HIGH).
- * bang is where the bold "!" starts. Each gauge has its own thresholds:
- * context degrades early, while the rate limits reset on their own and
- * leave room, so they warn later and use "!" only when nearly exhausted.
- */
-enum { LOW, OK, WARN, HIGH, NBAND };
-typedef struct { int t[3], bang; } Gauge;
-static const Gauge G_CTX = { { 20, 50, 80 }, 80 };
-static const Gauge G_5H  = { { 40, 70, 90 }, 98 };
-static const Gauge G_7D  = { { 50, 80, 95 }, 99 };
-
-typedef struct {
-    const char *model, *dim, *sep, *empty, *text, *eff, *fast; /* model/eff: fallbacks */
-    const EffortColors *effc;
-    const ModelTints *tint;
-    const char *num[NBAND]; /* percentage numbers; also the bar when it has no number */
-    const char *bar[NBAND]; /* bar fill when a number follows (never bold) */
-} Palette;
-
-/*
- * Effort: the dark set matches Claude Code's own /effort picker (static, no
- * shimmer); max is a pastel rainbow (red / yellow / blue). The light set is
- * the same hues darkened to >= 4.5:1 on white. The color-blind sets use a
- * reddish-purple ramp plus an Okabe-Ito max, so effort never borrows a gauge
- * hue (blue / bluish green / orange / vermillion).
- */
-static const EffortColors EFF_DARK = {
-    RGB(241, 158, 56), RGB(105, 154, 188), RGB(116, 144, 247), RGB(182, 124, 247),
-    RGB(232, 119, 108) "m" RGB(216, 192, 96) "a" RGB(106, 169, 230) "x",
-};
-static const EffortColors EFF_LIGHT = {
-    RGB(176, 98, 10), RGB(61, 107, 140), RGB(63, 91, 214), RGB(130, 64, 208),
-    RGB(192, 68, 58) "m" RGB(138, 109, 12) "a" RGB(45, 111, 184) "x",
-};
-static const EffortColors EFF_DARK_CB = {
-    RGB(180, 167, 214), RGB(196, 155, 208), RGB(208, 143, 196), RGB(204, 121, 167),
-    RGB(204, 121, 167) "m" RGB(240, 228, 66) "a" RGB(86, 180, 233) "x",
-};
-static const EffortColors EFF_LIGHT_CB = {
-    RGB(110, 95, 158), RGB(133, 83, 143), RGB(154, 74, 134), RGB(168, 64, 122),
-    RGB(168, 64, 122) "m" RGB(122, 111, 0) "a" RGB(31, 111, 168) "x",
-};
-
-/* Model: near-neutral, low-chroma tints (mint / lilac / sand / ice). */
-static const ModelTints TINT_DARK = {
-    { BRGB(214, 228, 222), BRGB(205, 192, 232), BRGB(232, 214, 184), BRGB(190, 220, 232) },
-    { RGB(138, 150, 145),  RGB(136, 128, 156),  RGB(156, 144, 124),  RGB(126, 146, 156) },
-};
-static const ModelTints TINT_LIGHT = {
-    { BRGB(47, 90, 76),    BRGB(74, 58, 120),   BRGB(106, 76, 34),   BRGB(42, 84, 102) },
-    { RGB(95, 111, 105),   RGB(107, 99, 128),   RGB(122, 106, 82),   RGB(92, 110, 120) },
-};
-
-/*
- * Gauges, standard palette:
- *   4 bands: blue · green · amber · red (bold number). Thresholds per gauge (G_CTX/G_5H/G_7D).
- * Two tones per band, same hue. Bars are the saturated shade; numbers are a
- * muted, low-chroma shade that is easy on the eyes (dark: lighter, >= 6:1;
- * light: darker, >= 4.5:1 except the top band, which is bold).
- */
-static const Palette DARK = {
-    .model = BOLD(254), .dim = ESC(243), .sep = ESC(240), .empty = ESC(238), .text = ESC(252),
-    .eff = ESC(215), .fast = BOLD(221), .effc = &EFF_DARK, .tint = &TINT_DARK,
-    .num = { ESC(74), ESC(108), ESC(179), BOLD(174) },
-    .bar = { ESC(32), ESC(35), ESC(172), ESC(160) },
-};
-static const Palette LIGHT = {
-    .model = BOLD(236), .dim = ESC(244), .sep = ESC(249), .empty = ESC(252), .text = ESC(236),
-    .eff = ESC(130), .fast = BOLD(130), .effc = &EFF_LIGHT, .tint = &TINT_LIGHT,
-    .num = { ESC(24), ESC(29), ESC(94), BOLD(131) },
-    .bar = { ESC(33), ESC(35), ESC(172), ESC(160) },
-};
-
-/*
- * Color-blind palette (--cb), Okabe-Ito based:
- *   4 bands: blue · bluish green · orange · vermillion (bold number).
- * Checked with a Machado 2009 protan/deutan simulation: neighboring bands stay
- * apart, and the top two bands also differ in lightness. The filled bar (━)
- * differs in shape from its track (─).
- */
-static const Palette DARK_CB = {
-    .model = BOLD(255), .dim = ESC(245), .sep = ESC(240), .empty = ESC(240), .text = ESC(252),
-    .eff = ESC(183), .fast = BOLD(229), .effc = &EFF_DARK_CB, .tint = &TINT_DARK,
-    .num = { ESC(74), ESC(115), ESC(179), BOLD(166) },
-    .bar = { ESC(32), ESC(36), ESC(214), ESC(202) },
-};
-static const Palette LIGHT_CB = {
-    .model = BOLD(235), .dim = ESC(243), .sep = ESC(249), .empty = ESC(250), .text = ESC(236),
-    .eff = ESC(97), .fast = BOLD(236), .effc = &EFF_LIGHT_CB, .tint = &TINT_LIGHT,
-    .num = { ESC(24), ESC(29), ESC(130), BOLD(88) },
-    .bar = { ESC(26), ESC(36), ESC(172), ESC(124) },
-};
-static const Palette *P = &DARK;
-static int show_pct = 0; /* --pct: also print numbers next to the 5h and 7d bars (context always has one) */
-
-#define BAR_CELLS 12
-#define MAX_INPUT (1 << 20) /* the payload is a few KB; never buffer more than this */
-
-static void put_sep(void) { fputs(P->sep, stdout); fputs("  │  " RST, stdout); }
-
-/* ---------- minimal JSON path lookup ---------- */
+/* ---------- JSON: path lookup on NUL-terminated text, no allocation ---------- */
 static const char *ws(const char *p) {
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
     return p;
 }
 
-/* p points at opening quote; returns pointer just past the closing quote */
+/* p is at an opening quote; returns just past the closing one */
 static const char *skip_str(const char *p) {
-    p++;
-    while (*p && *p != '"') {
-        if (*p == '\\' && p[1]) p++;
-        p++;
+    for (const char *q = p + 1;;) {
+        const char *e = strchr(q, '"');
+        if (!e) return q + strlen(q);
+        const char *b = e;
+        while (b > p + 1 && b[-1] == '\\') b--;
+        if (!((e - b) & 1)) return e + 1;
+        q = e + 1;
     }
-    return *p ? p + 1 : p;
+}
+
+/* p is at a bracket; returns just past the matching one, NULL if it never closes */
+static const char *closing(const char *p) {
+    int depth = 0;
+    for (;;) {
+        p += strcspn(p, "\"{}[]");
+        if (!*p) return NULL;
+        if (*p == '"') { p = skip_str(p); continue; }
+        depth += (*p == '{' || *p == '[') ? 1 : -1;
+        p++;
+        if (!depth) return p;
+    }
 }
 
 static const char *skip_val(const char *p) {
-    p = ws(p);
     if (*p == '"') return skip_str(p);
     if (*p == '{' || *p == '[') {
-        int depth = 0;
-        while (*p) {
-            if (*p == '"') { p = skip_str(p); continue; }
-            if (*p == '{' || *p == '[') depth++;
-            else if (*p == '}' || *p == ']') { if (--depth == 0) return p + 1; }
-            p++;
-        }
-        return p;
+        const char *e = closing(p);
+        return e ? e : p + strlen(p);
     }
-    while (*p && *p != ',' && *p != '}' && *p != ']') p++;
-    return p;
+    return p + strcspn(p, ",}] \t\r\n");
 }
 
-/* p points at an object; returns pointer to the value of `key`, or NULL */
-static const char *member(const char *p, const char *key, size_t klen) {
-    p = ws(p);
-    if (*p != '{') return NULL;
-    p++;
-    for (;;) {
-        p = ws(p);
-        if (*p != '"') return NULL;
-        const char *ks = p + 1, *ke = skip_str(p);
-        if (ke <= ks) return NULL;
-        size_t len = (size_t)(ke - 1 - ks);
-        p = ws(ke);
+/* value of key in the object at p; NULL when absent or null */
+static const char *member(const char *p, const char *key) {
+    size_t klen = strlen(key);
+    if (!p || *p != '{') return NULL;
+    p = ws(p + 1);
+    while (*p == '"') {
+        const char *k = p + 1, *e = skip_str(p);
+        p = ws(e);
         if (*p != ':') return NULL;
         p = ws(p + 1);
-        if (len == klen && memcmp(ks, key, klen) == 0) return p;
+        if ((size_t)(e - 1 - k) == klen && !memcmp(k, key, klen))
+            return strncmp(p, "null", 4) ? p : NULL;
         p = ws(skip_val(p));
         if (*p != ',') return NULL;
-        p++;
+        p = ws(p + 1);
     }
+    return NULL;
 }
 
-/* dotted path lookup from any object: "rate_limits.five_hour.used_percentage" */
-static const char *get(const char *root, const char *path) {
-    const char *p = root;
-    while (p && *path) {
-        const char *dot = strchr(path, '.');
-        size_t n = dot ? (size_t)(dot - path) : strlen(path);
-        p = member(p, path, n);
-        path += n;
-        if (*path == '.') path++;
-    }
-    return p ? ws(p) : NULL;
-}
-
-static int get_num(const char *root, const char *path, double *out) {
-    const char *p = get(root, path);
+static int num(const char *p, double *out) {
     if (!p || !(*p == '-' || (*p >= '0' && *p <= '9'))) return 0;
     *out = strtod(p, NULL);
+    return *out > -1e12 && *out < 1e12;
+}
+
+static int is_true(const char *p) { return p && !strncmp(p, "true", 4); }
+
+static int is_str(const char *p, const char *s) {
+    size_t n = strlen(s);
+    return p && *p == '"' && !strncmp(p + 1, s, n) && p[n + 1] == '"';
+}
+
+static int hex4(const char *p, uint32_t *out) {
+    *out = 0;
+    for (int i = 0; i < 4; i++) {
+        char c = p[i];
+        int v = c >= '0' && c <= '9' ? c - '0'
+              : c >= 'a' && c <= 'f' ? c - 'a' + 10
+              : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (v < 0) return 0;
+        *out = *out << 4 | (uint32_t)v;
+    }
     return 1;
 }
 
-/*
- * Copies a string value into out (always NUL-terminated); returns 0 when it is
- * missing, not a string, or empty. Control characters are dropped (\n \t \r
- * become spaces) and \uXXXX becomes '?', so the payload can never inject
- * terminal escape sequences. A cut at cap never splits a UTF-8 sequence.
- */
-static int get_str(const char *root, const char *path, char *out, size_t cap) {
-    const char *p = get(root, path);
-    size_t i = 0;
-    if (p && *p == '"') {
-        for (p++; *p && *p != '"' && i + 1 < cap; p++) {
-            unsigned char c = (unsigned char)*p;
-            if (c == '\\' && p[1]) {
-                c = (unsigned char)*++p;
-                if (c == 'u') { for (int k = 0; k < 4 && p[1]; k++) p++; c = '?'; }
-                else if (c == 'n' || c == 't' || c == 'r') c = ' ';
-                else if (c != '"' && c != '\\' && c != '/') continue; /* \b \f */
+/* next decoded code point of a JSON string body; 0 at its end */
+static uint32_t next_cp(const char **pp) {
+    const unsigned char *p = (const unsigned char *)*pp;
+    uint32_t c = *p;
+    if (!c || c == '"') return 0;
+    p++;
+    if (c == '\\') {
+        if (!*p) return 0;
+        c = *p++;
+        switch (c) {
+        case 'n': c = '\n'; break;
+        case 't': c = '\t'; break;
+        case 'r': c = '\r'; break;
+        case 'b': c = '\b'; break;
+        case 'f': c = '\f'; break;
+        case 'u': {
+            uint32_t lo;
+            if (!hex4((const char *)p, &c)) return 0;
+            p += 4;
+            if (c >= 0xD800 && c < 0xDC00 && p[0] == '\\' && p[1] == 'u' &&
+                hex4((const char *)p + 2, &lo) && lo >= 0xDC00 && lo < 0xE000) {
+                c = 0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00);
+                p += 6;
             }
-            if (c < 0x20 || c == 0x7f) continue;
-            out[i++] = (char)c;
+            if (!c || (c >= 0xD800 && c < 0xE000)) c = 0xFFFD;
+            break;
         }
-        if (*p && *p != '"') { /* truncated: drop a possibly split last character */
-            while (i > 0 && ((unsigned char)out[i - 1] & 0xC0) == 0x80) i--;
-            if (i > 0 && ((unsigned char)out[i - 1] & 0xC0) == 0xC0) i--;
+        default: break; /* quote, backslash and slash stand for themselves */
+        }
+    } else if (c >= 0x80) {
+        int n = c >= 0xF0 && c < 0xF8 ? 3 : c >= 0xE0 && c < 0xF0 ? 2 : c >= 0xC0 && c < 0xE0 ? 1 : 0;
+        if (!n) c = 0xFFFD;
+        else {
+            static const uint32_t least[] = { 0, 0x80, 0x800, 0x10000 };
+            const uint32_t min = least[n];
+            c &= 0x3Fu >> n;
+            for (; n; n--) {
+                if ((*p & 0xC0) != 0x80) { c = 0xFFFD; break; }
+                c = c << 6 | (*p++ & 0x3F);
+            }
+            if (c < min || c > 0x10FFFF || (c >= 0xD800 && c < 0xE000)) c = 0xFFFD;
         }
     }
-    out[i] = 0;
-    return i > 0;
+    *pp = (const char *)p;
+    return c;
 }
 
-static int get_true(const char *root, const char *path) {
-    const char *p = get(root, path);
-    return p && strncmp(p, "true", 4) == 0;
+static int put_utf8(char *o, uint32_t c) {
+    if (c < 0x80) { o[0] = (char)c; return 1; }
+    if (c < 0x800) { o[0] = (char)(0xC0 | c >> 6); o[1] = (char)(0x80 | (c & 63)); return 2; }
+    if (c < 0x10000) {
+        o[0] = (char)(0xE0 | c >> 12); o[1] = (char)(0x80 | (c >> 6 & 63));
+        o[2] = (char)(0x80 | (c & 63));
+        return 3;
+    }
+    o[0] = (char)(0xF0 | c >> 18); o[1] = (char)(0x80 | (c >> 12 & 63));
+    o[2] = (char)(0x80 | (c >> 6 & 63)); o[3] = (char)(0x80 | (c & 63));
+    return 4;
+}
+
+/* Text that is safe to draw: no control, bidi or invisible characters. */
+typedef struct { char *buf; size_t cap, len; int chars, limit, space, verbatim; } Text;
+
+static int is_blank(uint32_t c) {
+    return c == ' ' || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) ||
+           c == 0x202F || c == 0x205F || c == 0x2800 || c == 0x3000;
+}
+
+static int is_unsafe(uint32_t c) {
+    return c < 0x20 || (c >= 0x7F && c < 0xA0) ||                 /* C0, C1: escape sequences */
+           c == 0x61C || c == 0x200E || c == 0x200F ||            /* bidi */
+           (c >= 0x202A && c <= 0x202E) || (c >= 0x2060 && c <= 0x206F) ||
+           c == 0xAD || c == 0x34F || c == 0x115F || c == 0x1160 || /* invisible */
+           c == 0x180E || c == 0x200B || c == 0x3164 || c == 0xFEFF || c == 0xFFA0 ||
+           (c >= 0xFFF9 && c <= 0xFFFB) || (c >= 0xE0000 && c <= 0xE0FFF);
+}
+
+/* verbatim (names and paths) keeps blanks; line breaks and tabs always collapse */
+static void text_add(Text *t, uint32_t c) {
+    if ((c >= '\t' && c <= '\r') || c == 0x85 || c == 0x2028 || c == 0x2029 ||
+        (!t->verbatim && is_blank(c))) {
+        t->space = t->chars > 0;
+        return;
+    }
+    if (is_unsafe(c)) return;
+    if (t->len + 6 > t->cap) return;
+    if (t->space && t->chars < t->limit) { t->buf[t->len++] = ' '; t->chars++; }
+    t->space = 0;
+    if (t->chars < t->limit) { t->len += (size_t)put_utf8(t->buf + t->len, c); t->chars++; }
+    t->buf[t->len] = 0;
+}
+
+static void text_json(Text *t, const char *p) {
+    uint32_t c;
+    if (!p || *p != '"') return;
+    p++;
+    while (t->chars < t->limit && t->len + 6 <= t->cap && (c = next_cp(&p))) text_add(t, c);
+}
+
+/* exact string value, for paths handed to the system */
+static int raw_json(const char *p, char *out, size_t cap) {
+    size_t n = 0;
+    uint32_t c;
+    if (!p || *p != '"') return 0;
+    p++;
+    while ((c = next_cp(&p))) {
+        if (n + 5 > cap) return 0;
+        n += (size_t)put_utf8(out + n, c);
+    }
+    out[n] = 0;
+    return n > 0;
+}
+
+/* ---------- last prompt ---------- */
+/* Cheap filter before any parsing. Searching for the rare ':' beats memmem, slow on macOS. */
+static int has_user_type(const char *line, size_t len) {
+    static const char KEY[] = "\"type\":\"user\"";
+    const size_t colon = 6, klen = sizeof KEY - 1;
+    if (len < klen) return 0;
+    const char *p = line + colon, *stop = line + len - (klen - colon) + 1;
+    while (p < stop && (p = memchr(p, ':', (size_t)(stop - p)))) {
+        if (!memcmp(p - colon, KEY, klen)) return 1;
+        p++;
+    }
+    return 0;
+}
+
+typedef struct { char when[8], text[PROMPT_CHARS * 4 + 8]; } Prompt;
+
+static int starts_tag(const char *s) {
+    if (!s || *s != '"') return 0;
+    s++;
+    return next_cp(&s) == '<'; /* decoded, as it may be written < */
+}
+
+/* Fills pr and returns 1 when line is a prompt the user typed. */
+static int parse_prompt(const char *line, size_t len, Prompt *pr) {
+    if (len > MAX_LINE) return 0;
+    while (len && (line[len - 1] == '\r' || line[len - 1] == ' ' || line[len - 1] == '\t')) len--;
+    if (!len || line[len - 1] != '}') return 0; /* blank or still being written */
+    if (!has_user_type(line, len)) return 0;
+    if (!is_str(member(line, "type"), "user")) return 0;
+
+    const char *c = member(member(line, "message"), "content");
+    if (!c) return 0;
+    Text t = { pr->text, sizeof pr->text, 0, 0, PROMPT_CHARS, 0, 0 };
+    pr->text[0] = 0;
+    if (*c == '"') {
+        if (starts_tag(c)) return 0; /* command output, notifications */
+        text_json(&t, c);
+    } else if (*c == '[') {
+        int first = 1;
+        for (c = ws(c + 1); *c == '{';) {
+            const char *type = member(c, "type");
+            if (is_str(type, "tool_result")) return 0; /* tool output cannot pose as a prompt */
+            if (is_str(type, "text")) {
+                const char *s = member(c, "text");
+                if (first && starts_tag(s)) return 0;
+                if (!first) text_add(&t, ' ');
+                first = 0;
+                text_json(&t, s);
+            }
+            c = ws(skip_val(c));
+            if (*c != ',') break;
+            c = ws(c + 1);
+        }
+    }
+    if (!t.len || !strncmp(pr->text, "[Request interrupted by user", 28)) return 0;
+    /* last, as an absent key costs a walk over the whole line, and tool results can be megabytes */
+    if (is_true(member(line, "isMeta")) || is_true(member(line, "isSidechain")) ||
+        is_true(member(line, "isCompactSummary")) || member(line, "toolUseResult")) return 0;
+    /* still being written, damaged, or two records fused: '}' at the end is not enough */
+    if (closing(line) != line + len) return 0;
+
+    pr->when[0] = 0;
+    const char *ts = member(line, "timestamp");
+    struct tm tm = {0};
+    if (ts && *ts == '"' && sscanf(ts + 1, "%4d-%2d-%2dT%2d:%2d:%2d", &tm.tm_year, &tm.tm_mon,
+                                  &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec) == 6) {
+        tm.tm_year -= 1900;
+        tm.tm_mon -= 1;
+        time_t at = timegm(&tm); /* the transcript is in UTC */
+        struct tm local;
+        if (localtime_r(&at, &local)) strftime(pr->when, sizeof pr->when, "%H:%M", &local);
+    }
+    return 1;
+}
+
+static const char *rfind_nl(const char *start, const char *end) {
+    const uint64_t ones = 0x0101010101010101ULL;
+    while (end - start >= 512 && !memchr(end - 512, '\n', 512)) end -= 512; /* long lines */
+    while (end - start >= 8) {
+        uint64_t w;
+        memcpy(&w, end - 8, 8);
+        w ^= ones * '\n';
+        if ((w - ones) & ~w & (ones << 7)) break; /* this word holds a newline */
+        end -= 8;
+    }
+    while (end > start)
+        if (*--end == '\n') return end;
+    return NULL;
+}
+
+/*
+ * buf[head..cap) always holds the unfinished line that starts at or before file
+ * offset pos. Only that one line is kept, so memory follows the longest line
+ * visited, not the file size: the buffer has room for MAX_LINE but fills from
+ * its top, and pages never touched use no RAM.
+ */
+static int last_prompt(const char *path, Prompt *pr) {
+    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return 0;
+    struct stat st;
+    size_t cap = MAX_LINE + CHUNK, head = cap; /* a chunk of room for the line before */
+    char *buf = NULL;
+    int found = 0, skipping = 0;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || !(buf = malloc(cap + 1))) goto done;
+
+    off_t pos = st.st_size;
+    while (pos > 0 && st.st_size - pos < MAX_SCAN) {
+        size_t n = pos < CHUNK ? (size_t)pos : CHUNK;
+        if (head < n) { /* line too long to hold */
+            skipping = 1;
+            head = cap;
+        }
+        head -= n;
+        pos -= (off_t)n;
+        if (pread(fd, buf + head, n, pos) != (ssize_t)n) goto done;
+
+        char *end = buf + cap, *from = buf + head + n;
+        const char *nl;
+        while ((nl = rfind_nl(buf + head, from))) {
+            char *line = buf + (nl - buf) + 1;
+            *end = 0;
+            if (!skipping && parse_prompt(line, (size_t)(end - line), pr)) { found = 1; goto done; }
+            skipping = 0;
+            end = from = line - 1;
+        }
+        if (skipping) {
+            head = cap;
+        } else if (end != buf + cap) {
+            size_t keep = (size_t)(end - (buf + head));
+            memmove(buf + cap - keep, buf + head, keep);
+            head = cap - keep;
+        }
+        if (!pos && !skipping) {
+            buf[cap] = 0;
+            found = parse_prompt(buf + head, cap - head, pr);
+        }
+    }
+done:
+    free(buf);
+    close(fd);
+    return found;
+}
+
+/* ---------- git ---------- */
+/* the nearest directory holding .git, on the physical path as git sees it */
+static int find_root(const char *dir, char *p, size_t cap) {
+    if (*dir != '/') return 0;
+    char *real = realpath(dir, NULL);
+    if (!real) return 0;
+    size_t n = strlen(real);
+    int fits = n + 6 < cap;
+    if (fits) memcpy(p, real, n + 1);
+    free(real);
+    if (!fits) return 0;
+    for (;;) {
+        struct stat st;
+        strcpy(p + n, "/.git");
+        if (!stat(p, &st)) {
+            if (n) p[n] = 0;
+            else strcpy(p, "/");
+            return 1;
+        }
+        while (n && p[n - 1] != '/') n--;
+        if (!n) return 0;
+        n--;
+    }
+}
+
+static volatile sig_atomic_t child; /* the running git */
+
+/* a git that hangs is killed; again a second later, in case its child holds the pipe */
+static void on_timeout(int sig) {
+    (void)sig;
+    if (child > 0) kill((pid_t)child, SIGKILL);
+    alarm(1);
+}
+
+/* a cancelled status line takes its git with it */
+static void on_cancel(int sig) {
+    if (child > 0) kill((pid_t)child, SIGTERM);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/*
+ * Starts git without waiting, so that it runs while the transcript is being read.
+ * A repository's contents must not be able to run anything:
+ * - git starts at the root and refuses bare repositories, as a clone can carry
+ *   one, config included, as ordinary files in a subdirectory;
+ * - fsmonitor and hooks are off, as config can point them at any program;
+ * - nothing is fetched, as that runs transports named in the config;
+ * - the working directory is / (see main), so PATH cannot find the project's "git".
+ * A clean or process filter in .git/config itself still runs, as it does for
+ * git status. A clone cannot deliver one; a copied .git directory can.
+ */
+static int git_start(const char *dir) {
+    char root[4096];
+    if (!find_root(dir, root, sizeof root)) return -1;
+    if (setenv("GIT_NO_LAZY_FETCH", "1", 1) || setenv("GIT_ALLOW_PROTOCOL", "", 1)) return -1;
+    /* spares git the locale lookup and translations; its character set is left alone */
+    setenv("LANG", "C", 0);
+    setenv("LC_MESSAGES", "C", 1);
+    char *const argv[] = {
+        "git", "--no-optional-locks",
+        "-c", "core.fsmonitor=", /* empty, as git before 2.36 runs "false" as a command */
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "safe.bareRepository=explicit",
+        "-c", "status.renames=false",
+        "-C", root, "status", "--porcelain=v2", "--branch",
+        "--no-ahead-behind", /* that count can walk thousands of commits */
+        NULL,
+    };
+    int fd[2];
+    pid_t pid;
+    if (pipe(fd)) return -1;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, fd[1], 1);
+    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addclose(&fa, fd[0]);
+    /* or whatever git leaves in the background would keep the pipe open */
+    if (fd[1] > 2) posix_spawn_file_actions_addclose(&fa, fd[1]);
+
+    struct sigaction sa; /* no SA_RESTART, so a timeout ends a blocked read */
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_timeout;
+    sigaction(SIGALRM, &sa, NULL);
+
+    /* no cancel between the spawn and recording the pid; git gets the original mask */
+    const int cancels[] = { SIGTERM, SIGINT, SIGHUP };
+    sigset_t hold, old;
+    sigemptyset(&hold);
+    for (size_t i = 0; i < sizeof cancels / sizeof *cancels; i++) {
+        if (signal(cancels[i], on_cancel) == SIG_IGN) signal(cancels[i], SIG_IGN);
+        sigaddset(&hold, cancels[i]);
+    }
+    sigprocmask(SIG_BLOCK, &hold, &old);
+    posix_spawnattr_t at;
+    posix_spawnattr_init(&at);
+    posix_spawnattr_setsigmask(&at, &old);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK);
+    int err = posix_spawnp(&pid, "git", &fa, &at, argv, environ);
+    if (!err) child = pid;
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    posix_spawnattr_destroy(&at);
+    posix_spawn_file_actions_destroy(&fa);
+    close(fd[1]);
+    if (err) { close(fd[0]); return -1; }
+    alarm(GIT_TIMEOUT);
+    return fd[0];
+}
+
+/* "main", "main*" when dirty, or a short hash when detached */
+static void git_finish(int fd, char *out, size_t cap) {
+    if (fd < 0) return;
+    FILE *f = fdopen(fd, "r");
+    char line[2048], oid[8] = "", name[1024] = "";
+    int dirty = 0, bol = 1;
+    if (f) {
+        while (fgets(line, sizeof line, f)) {
+            size_t n = strcspn(line, "\n");
+            int starts = bol;
+            bol = line[n] == '\n';
+            line[n] = 0;
+            if (!starts) continue;
+            if (line[0] != '#') { dirty = 1; break; } /* one change is enough */
+            if (!strncmp(line, "# branch.oid ", 13)) snprintf(oid, sizeof oid, "%.7s", line + 13);
+            else if (!strncmp(line, "# branch.head ", 14)) snprintf(name, sizeof name, "%.1023s", line + 14);
+        }
+        fclose(f);
+    } else {
+        close(fd);
+    }
+    pid_t pid = (pid_t)child;
+    if (dirty) kill(pid, SIGTERM);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    child = 0;
+    alarm(0);
+
+    if (!strcmp(name, "(unknown)")) return;
+    const char *label = strcmp(name, "(detached)") ? name : oid;
+    if (*label) snprintf(out, cap, "%s%s", label, dirty ? "*" : "");
+    for (char *c = out; (c = strchr(c, '|'));) *c = '_'; /* must not pass for a separator */
 }
 
 /* ---------- rendering ---------- */
-/* Percentages are rounded once, so the number, its color and "!" always agree. */
-static int pct_round(double p) { return p <= 0 ? 0 : p >= 100 ? 100 : (int)(p + 0.5); }
-
-static int band(const Gauge *g, int p) {
-    return p < g->t[0] ? LOW : p < g->t[1] ? OK : p < g->t[2] ? WARN : HIGH;
-}
-
-/* percentage; "!" at >= g->bang, padded otherwise */
-static void put_pct(const Gauge *g, int p, int width, int pad) {
-    printf("%s%*d%%%s" RST, P->num[band(g, p)], width, p, p >= g->bang ? "!" : (pad ? " " : ""));
-}
-
-/*
- * Model name tinted per family (FAMILY / P->tint). The current generation
- * (major version >= CURRENT_GEN, or no version in the name) is bold; older
- * ones use the dimmer legacy shade. Unknown families use P->model.
- */
-#define CURRENT_GEN 5
-static void put_model(const char *m) {
-    const char *c = P->model;
-    const char *d = m;
-    while (*d && (*d < '0' || *d > '9')) d++;
-    int legacy = *d && strtol(d, NULL, 10) < CURRENT_GEN;
-    for (int i = 0; i < NFAMILY; i++)
-        if (strstr(m, FAMILY[i])) { c = legacy ? P->tint->old[i] : P->tint->cur[i]; break; }
-    printf("%s%s" RST, c, m);
-}
-
-/* Effort level in P->effc colors; unknown levels fall back to P->eff. */
-static void put_effort(const char *e) {
-    const EffortColors *E = P->effc;
-    if (!strcmp(e, "max")) { fputs(E->max, stdout); fputs(RST, stdout); return; }
-    const char *c = !strcmp(e, "low")    ? E->low
-                  : !strcmp(e, "medium") ? E->medium
-                  : !strcmp(e, "high")   ? E->high
-                  : !strcmp(e, "xhigh")  ? E->xhigh : P->eff;
-    printf("%s%s" RST, c, e);
-}
-
-/*
- * With --pct (all three bars alike): bar in the deep bar[]
- * shade, followed by the number. Without --pct (default): the bar
- * takes the number color instead, with bold switched off (\033[22m) because the bar is never bold.
- * raw > 0 always fills at least one cell, so any usage shows.
- */
-static void put_bar(const Gauge *g, int p, double raw, int known, int num) {
-    int filled = known ? (p * BAR_CELLS + 50) / 100 : 0;
-    if (known && raw > 0 && filled == 0) filled = 1;
-    if (filled) {
-        if (num) fputs(P->bar[band(g, p)], stdout);
-        else        { fputs(P->num[band(g, p)], stdout); fputs("\033[22m", stdout); }
-        for (int i = 0; i < filled; i++) fputs("━", stdout);
+static void put_raw(const char *s, int limit) {
+    char buf[4096];
+    Text t = { buf, sizeof buf, 0, 0, limit, 0, 1 };
+    buf[0] = 0;
+    uint32_t c;
+    while (*s) {
+        if (*s == '"' || *s == '\\') { text_add(&t, (unsigned char)*s++); continue; }
+        if (!(c = next_cp(&s))) break;
+        text_add(&t, c);
     }
-    fputs(P->empty, stdout);
-    for (int i = filled; i < BAR_CELLS; i++) fputs("─", stdout);
-    fputs(RST, stdout);
+    fputs(buf, stdout);
 }
 
-/* the number or, without one, a bold "!" after the bar when extreme */
-static void put_value(const Gauge *g, int p, int width, int pad, int num) {
-    if (num)     put_pct(g, p, width, pad);
-    else if (p >= g->bang) printf("%s!" RST, P->num[HIGH]);
-    else if (pad)     putchar(' ');
+static void sep(void) { fputs(" " SEP "|" RST " ", stdout); }
+
+static void put_pct(double v) {
+    long long p = (long long)v;
+    if ((double)p > v) p--;
+    printf("%s%lld%%" RST, p < 50 ? GREEN : p < 80 ? YELLOW : RED, p);
 }
 
-/* gauge label, padded so all three bars start in the same column */
-static void put_label(const char *label) { printf("%s%-7s" RST " ", P->dim, label); }
-
-/* context row: "context ━━━━━───────" (unknown: "--") */
-static void put_ctx(const char *json) {
-    double raw = 0;
-    int has = get_num(json, "context_window.used_percentage", &raw);
-    int p = pct_round(raw);
-    put_label("context");
-    put_bar(&G_CTX, p, raw, has, show_pct);
-    fputs("  ", stdout);
-    if (!has) printf("%s --%%" RST, P->dim);
-    else      put_value(&G_CTX, p, 3, 0, 1);
+static void put_limit(const char *win, const char *label, double now) {
+    double used, reset;
+    if (!num(member(win, "used_percentage"), &used)) return;
+    sep();
+    printf(DIM "%s" RST " ", label);
+    put_pct(used);
+    if (!num(member(win, "resets_at"), &reset)) return;
+    long long s = reset > now ? (long long)(reset - now) : 0;
+    fputs(" " DIM "(", stdout);
+    if (s >= 86400) printf("%lldd%lldh", s / 86400, s % 86400 / 3600);
+    else if (s >= 3600) printf("%lldh%lldm", s / 3600, s % 3600 / 60);
+    else printf("%lldm", s / 60);
+    fputs(")" RST, stdout);
 }
 
-/*
- * Time left until resets_at: "42m", "2h05m", "3d04h". Minutes round up, so
- * it never reads 0m while the limit is still in force. Absurd timestamps
- * are skipped.
- */
-static int fmt_left(const char *win, char *buf, size_t cap) {
-    double reset;
-    if (!get_num(win, "resets_at", &reset) || reset < 0 || reset > 1e11) return 0;
-    double s = reset - (double)time(NULL);
-    long m = s <= 0 ? 0 : (long)((s + 59) / 60);
-    long d = m / 1440, h = m / 60 % 24;
-    if (d)           snprintf(buf, cap, "%ldd%02ldh", d, h);
-    else if (m >= 60) snprintf(buf, cap, "%ldh%02ldm", h, m % 60);
-    else             snprintf(buf, cap, "%ldm", m);
-    return 1;
-}
-
-/* one rate-limit row; win is the object at rate_limits.<window> */
-static void put_limit(const Gauge *g, const char *win, const char *label) {
-    double raw;
-    get_num(win, "used_percentage", &raw); /* checked by the caller */
-    int p = pct_round(raw);
-    put_label(label);
-    put_bar(g, p, raw, 1, show_pct);
-    if (show_pct) fputs("  ", stdout);
-    put_value(g, p, 3, 1, show_pct);
-    char buf[32];
-    if (fmt_left(win, buf, sizeof buf))
-        printf("  %s%5s" RST, P->dim, buf);
-}
-
-/* display width of a UTF-8 string (one cell per code point) */
-static int u8width(const char *s) {
-    int n = 0;
-    for (; *s; s++) n += ((unsigned char)*s & 0xC0) != 0x80;
-    return n;
-}
-
-/* read stdin into a NUL-terminated heap buffer (NULL on failure) */
-static char *read_all(FILE *f) {
-    size_t cap = 16384, len = 0, n;
+static char *read_stdin(void) {
+    size_t cap = 16384, len = 0;
     char *buf = malloc(cap);
     if (!buf) return NULL;
-    while ((n = fread(buf + len, 1, cap - len - 1, f)) > 0) {
-        len += n;
-        if (cap - len < 4096) {
-            char *nb = cap < MAX_INPUT ? realloc(buf, cap * 2) : NULL;
-            if (!nb) break; /* parse what we have; missing fields degrade */
+    for (;;) {
+        ssize_t n = read(0, buf + len, cap - len - 1);
+        if (n <= 0) break;
+        len += (size_t)n;
+        if (len + 1 == cap) {
+            char *nb = cap < MAX_PAYLOAD ? realloc(buf, cap * 2) : NULL;
+            if (!nb) break;
             buf = nb;
             cap *= 2;
         }
@@ -385,72 +586,60 @@ static char *read_all(FILE *f) {
     return buf;
 }
 
-int main(int argc, char **argv) {
-    int light = 0, cb = 0; /* chosen once at install time by setup.sh */
-    for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        if      (!strcmp(a, "--light")) light = 1;
-        else if (!strcmp(a, "--dark"))  light = 0;
-        else if (!strcmp(a, "--cb"))    cb = 1;
-        else if (!strcmp(a, "--pct"))   show_pct = 1;
-        else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { fputs(USAGE, stdout); return 0; }
+int main(void) {
+    char *input = read_stdin();
+    if (!input) return 1;
+    const char *j = ws(input);
+
+    char dir[4096], path[4096], branch[1100] = "";
+    if (!raw_json(member(member(j, "workspace"), "current_dir"), dir, sizeof dir) &&
+        !raw_json(member(j, "cwd"), dir, sizeof dir) && !getcwd(dir, sizeof dir)) dir[0] = 0;
+    if (chdir("/")) return 1; /* from here on nothing relative resolves inside the project */
+    int git = git_start(dir);
+    Prompt pr;
+    int have_prompt = raw_json(member(j, "transcript_path"), path, sizeof path) && *path == '/' &&
+                      last_prompt(path, &pr);
+    git_finish(git, branch, sizeof branch);
+
+    /* line 1 */
+    char word[256] = "";
+    Text t = { word, sizeof word, 0, 0, 48, 0, 0 };
+    text_json(&t, member(member(j, "model"), "display_name"));
+    printf(DIM "%s" RST, t.len ? word : "Claude");
+
+    t = (Text){ word, sizeof word, 0, 0, 16, 0, 0 };
+    text_json(&t, member(member(j, "effort"), "level"));
+    if (t.len) { sep(); printf(DIM "%s" RST, word); }
+
+    if (*branch) { sep(); fputs(YELLOW, stdout); put_raw(branch, 1024); fputs(RST, stdout); }
+
+    double used = 0;
+    if (!num(member(member(j, "context_window"), "used_percentage"), &used)) used = 0;
+    sep();
+    put_pct(used);
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    double now = (double)tv.tv_sec + tv.tv_usec / 1e6;
+    const char *limits = member(j, "rate_limits");
+    put_limit(member(limits, "five_hour"), "5h", now);
+    put_limit(member(limits, "seven_day"), "7d", now);
+
+    /* line 2 */
+    if (have_prompt) {
+        fputs("\n" SEP "▸" RST " ", stdout);
+        if (*pr.when) printf(PURPLE "%s" RST " ", pr.when);
+        fputs(pr.text, stdout);
     }
-    P = cb ? (light ? &LIGHT_CB : &DARK_CB) : (light ? &LIGHT : &DARK);
 
-    char *json = read_all(stdin);
-    if (!json) return 1;
+    /* line 3 */
+    fputs("\n" SEP "└" RST " " BLUE, stdout);
+    const char *home = getenv("HOME"), *d = dir;
+    size_t h = home ? strlen(home) : 0;
+    if (h > 1 && !strncmp(dir, home, h) && (!dir[h] || dir[h] == '/')) { putchar('~'); d += h; }
+    put_raw(d, 1024);
+    fputs(RST, stdout);
 
-    /*
-     * Two columns:  model   │  context ━━━━───
-     *               effort  │  5h      ━━────   2h05m
-     *               ⚡fast   │  7d      ━━━━━─   3d04h
-     * The left cells stack up, so a missing effort moves ⚡fast up a row.
-     */
-    char model[128], effort[32];
-    if (!get_str(json, "model.display_name", model, sizeof model)) strcpy(model, "Claude");
-    int has_eff = get_str(json, "effort.level", effort, sizeof effort);
-    int fast = get_true(json, "fast_mode");
-
-    /* rate-limit rows, only for windows that are present */
-    static const char *const WIN[2][2] = { { "five_hour", "5h" }, { "seven_day", "7d" } };
-    const char *lim[2], *lab[2];
-    int nlim = 0;
-    const char *rl = get(json, "rate_limits");
-    for (int i = 0; rl && i < 2; i++) {
-        const char *w = get(rl, WIN[i][0]);
-        double tmp;
-        if (w && get_num(w, "used_percentage", &tmp)) { lim[nlim] = w; lab[nlim++] = WIN[i][1]; }
-    }
-
-    /* left column: model, effort, ⚡fast (two cells for ⚡), stacked */
-    enum { L_MODEL, L_EFF, L_FAST };
-    int left[3], lwid[3], nleft = 0;
-    left[nleft] = L_MODEL; lwid[nleft++] = u8width(model);
-    if (has_eff) { left[nleft] = L_EFF;  lwid[nleft++] = (int)strlen(effort); }
-    if (fast)    { left[nleft] = L_FAST; lwid[nleft++] = 6; }
-    int lw = 0;
-    for (int i = 0; i < nleft; i++) if (lwid[i] > lw) lw = lwid[i];
-    int rows = 1 + nlim > nleft ? 1 + nlim : nleft;
-
-    for (int r = 0; r < rows; r++) {
-        int w = 0;
-        if (r < nleft) {
-            if      (left[r] == L_MODEL) put_model(model);
-            else if (left[r] == L_EFF)   put_effort(effort);
-            else                         printf("%s⚡fast" RST, P->fast);
-            w = lwid[r];
-        }
-        if (r > nlim) { putchar('\n'); continue; } /* no gauge on this row */
-        /* Claude Code trims leading whitespace (no-break space included),
-         * so a row with an empty left column starts with U+2800 BRAILLE
-         * PATTERN BLANK: one blank cell that trim() does not count as space */
-        if (w == 0 && lw > 0) { fputs("\xe2\xa0\x80", stdout); w = 1; }
-        printf("%*s", lw - w, "");
-        put_sep();
-        if (r == 0) put_ctx(json);
-        else        put_limit(r == 1 ? &G_5H : &G_7D, lim[r - 1], lab[r - 1]);
-        putchar('\n');
-    }
-    free(json);
+    free(input);
     return 0;
 }

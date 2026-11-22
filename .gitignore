@@ -2,3 +2,9 @@ statusline
 .DS_Store
 CLAUDE.md
 .claude/settings.local.json
+.env
+.claude/
+*.jsonl
+*.dSYM/
+*.bak
+*.tmp

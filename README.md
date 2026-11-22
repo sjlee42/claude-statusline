@@ -2,31 +2,15 @@
 
 **English** | [한국어](README_한국어.md)
 
-A fast, minimal status line theme for [Claude Code](https://code.claude.com), written in plain C: context window and 5-hour/weekly usage bars, with dark, light, and color-blind palettes.
-One ~50 KB binary with no dependencies (no `jq`, Node, or Python at run time). Each run takes about 3 ms, most of it process start-up.
-You pick the palette once at install time.
+A fast, minimal status line for [Claude Code](https://code.claude.com), written in plain C: usage, git branch, your last prompt, and the working directory in three quiet lines.
 
-```
-Opus 5.5  │  context ━━━━━───────   42%
-high      │  5h      ━━━━━━━━────   2h05m
-⚡fast    │  7d      ━━━━━━━━━━━─!  3d04h
-```
+![preview](docs/preview.png)
 
-The context bar always shows its percentage. With `--pct`, the 5h and 7d bars show theirs too:
-
-```
-Opus 5.5  │  context ━━━━━───────   42%
-high      │  5h      ━━━━━━━━────   65%   2h05m
-⚡fast    │  7d      ━━━━━━━━━━━─   88%!  3d04h
-```
-
-| Dark terminal | Light terminal (`--light`) |
-|---|---|
-| ![dark preview](docs/preview-dark.png) | ![light preview](docs/preview-light.png) |
+> **Updating from the gauge version?** The layout is new, and line 2 now shows **the last prompt you typed** on screen, including anything secret you pasted into it.
 
 ## Install
 
-Requires a C compiler and `make` (on macOS: `xcode-select --install`). `python3` is used only to edit `settings.json`; without it, setup prints the line to add yourself.
+Tested on macOS (Apple silicon); Linux is untested. Requires git 2.17 or later for the branch (2.38 or later recommended for security), a C compiler, and `make` (on macOS: `xcode-select --install`). `python3` is used only to edit `settings.json`; without it, the installer prints the lines to add yourself.
 
 ```sh
 git clone https://github.com/sjlee42/claude-statusline.git
@@ -34,91 +18,62 @@ cd claude-statusline
 make install
 ```
 
-`make install` builds the binary and copies it to `~/.claude/statusline`. On first install it asks three questions, shows a preview, and writes the `statusLine` entry to `~/.claude/settings.json` (keeping a `.bak` copy):
-
-1. Terminal background: dark or light
-2. Color-blind friendly palette: yes or no
-3. Percentage numbers next to the bars: yes or no
-
 | Command | What it does |
 |---|---|
-| `git pull && make install` | Update. Only the binary is replaced; your palette is kept. |
-| `make setup` | Choose the palette again. |
-| `make uninstall` | Remove the binary, and the `statusLine` entry if it runs this binary. |
+| `make install` | Builds to `~/.claude/statusline` and sets `statusLine` in `settings.json` (keeps a `.bak`). Asks before replacing another status line. |
+| `git pull && make install` | Updates the binary. An existing `statusLine` entry is left as it is, so add `refreshInterval` yourself if it has none. |
+| `make uninstall` | Removes the binary, and the `statusLine` entry if it runs this binary. |
 
-If `CLAUDE_CONFIG_DIR` is set, these use that directory instead of `~/.claude`.
+Run these without `sudo`. `settings.json.bak` can contain API keys; keep it out of dotfile repositories.
 
-### Manual setup
-
-Add this to `~/.claude/settings.json` with the flags you want:
+`CLAUDE_CONFIG_DIR` is honored and must be an absolute path. To set it up by hand, add this to `~/.claude/settings.json` (with `CLAUDE_CONFIG_DIR`, use that directory in both paths):
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/statusline --dark"
+    "command": "~/.claude/statusline",
+    "refreshInterval": 60
   }
 }
 ```
 
-| Flag | Effect |
-|---|---|
-| `--dark` (default) / `--light` | palette for a dark or light terminal background |
-| `--cb` | color-blind friendly palette (red-green safe) |
-| `--pct` | also print the percentage next to the 5h and 7d bars (context always has one) |
+`refreshInterval` keeps the time left until each reset current while the session is idle.
 
 ## What it shows
 
-| Column | Content |
+| Line | Content |
 |---|---|
-| Left | Model name, then the reasoning effort (`low` … `max`), then `⚡fast` when fast mode is on |
-| Right | Three aligned bars: **context** (context window), **5h** (5-hour rate limit), **7d** (7-day rate limit), each limit with the time left until it resets, in gray |
+| 1 | Model, effort, git branch (`*` when there are changes), context used, 5-hour and 7-day limits with the time left until reset |
+| 2 | Time and first 60 characters of the last prompt you typed |
+| 3 | Working directory |
 
-- The 5h and 7d bars appear only when Claude Code sends rate-limit data (claude.ai Pro/Max subscribers, after the first response of a session).
-- The time left is `42m` under an hour, `2h05m` under a day, and `3d04h` beyond that.
-- Missing fields degrade gracefully. For example, early in a session the context shows `--%`.
-
-## Colors
-
-Each bar is colored by usage, and each gauge has its own thresholds. Context quality drops early, so it warns early. The 5h and 7d limits reset on their own and leave room, so they warn later, and a **bold** `!` appears only when the limit is nearly used up (on a bar with a number, after the number: `98%!`).
-
-| Band | Standard | Color-blind (`--cb`) | context | 5h | 7d |
-|---|---|---|---|---|---|
-| 1 | blue | blue | below 20% | below 40% | below 50% |
-| 2 | green | bluish green | 20–49% | 40–69% | 50–79% |
-| 3 | amber | orange | 50–79% | 70–89% | 80–94% |
-| 4 | red | vermillion | 80% and above | 90% and above | 95% and above |
-| `!` | | | 80% and above | 98% and above | 99% and above |
-
-- The filled part of a bar is a thick line (`━`) and the empty track is a thin line (`─`), so you can read how full it is even with low color contrast.
-- The model name uses a near-neutral tint per family (Fable, Opus, Sonnet, Haiku), and older generations are muted and not bold. Effort uses the colors of Claude Code's own `/effort` picker (darkened on light terminals).
-
-### Color-blind mode (`--cb`)
-
-Designed for red-green color blindness (protanopia and deuteranopia), where the standard green, amber, and red are hard to tell apart. The bands follow the Okabe-Ito palette, and neighboring bands also differ in lightness. Effort switches to a purple ramp, so neither the model name nor effort looks like a gauge state.
-
-The image shows the color-blind output (dark and light terminals, with and without `--pct`) next to simulated protanopia and deuteranopia (Machado et al. 2009). The top two bands also differ in lightness, so orange and vermillion stay apart.
-
-![color-blind simulation](docs/colorblind-check.png)
+Percentages are green below 50%, amber from 50%, and red from 80%. Context shows 0% until Claude Code reports it. Other parts without data are left out: the branch outside git, the limits without a Pro/Max plan, line 2 before the first prompt (or when it is more than 64 MB back).
 
 ## Speed
 
-Each run was timed 200 times on a Mac with the same sample payload. The times include process-spawn overhead from the timing harness.
+Median of repeated runs on an Apple M2 with synthetic transcripts, including process start-up.
 
-| Implementation | Median | p95 |
+| Case | bash + `jq` original | This (C) |
 |---|---|---|
-| **claude-statusline (C)** | **2.8 ms** | 3.4 ms |
-| Equivalent bash + `jq` script | 27.7 ms | 33.2 ms |
+| Short session | 31.4 ms | **2.6 ms** |
+| 32 MB session | 459.3 ms | **2.5 ms** |
+| Last prompt 17 MB back (the original missed it) | 455.3 ms | **4.5 ms** |
+| Inside a git repository | 32.6 ms | **6.7 ms** |
 
-Claude Code re-runs the status line command on every update (debounced at 300 ms), so start-up time matters more than anything else.
+Peak memory outside git is 1.6 MB, against 7.0 MB for the original.
+
+The transcript is read backward from its end until the last prompt is found, so the cost depends on how far back that prompt is, not on how long the session is.
 
 ## FAQ
 
-**Does it use tokens or context?** No. The status line runs locally, and its output is only drawn on screen, never sent to the model. See the [official docs](https://code.claude.com/docs/en/statusline).
+**Does it use tokens or context?** No. It runs locally and its output is only drawn on screen. See the [official docs](https://code.claude.com/docs/en/statusline).
 
-**Why not show the permission mode (auto, plan, …)?** It is not part of the status line data, and Claude Code already shows it in the footer right below.
+**What does it read?** The status line payload from Claude Code, the end of the current session's transcript, and `git status`. The program itself has no network code and writes no files. `git status` follows that repository's git config, which can name programs to run (clean filters, for example), so open only repositories you trust, as you would before running `git status` yourself.
 
-**Which fields does it read?** `model.display_name`, `context_window.used_percentage`, `effort.level`, `fast_mode`, and `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`, using a small purpose-built JSON lookup in `statusline.c`.
+**My last prompt shows in screenshots. Is that a problem?** It can be. Line 2 shows what you typed, pasted keys included, and line 3 shows your folder, so check both before you share your screen.
+
+**Where did the palettes and bars go?** This version has a single style. The earlier one is at [`96bad0c`](https://github.com/sjlee42/claude-statusline/tree/96bad0c). Old flags in your `settings.json` are ignored.
 
 ## Other Claude Code status lines
 
@@ -139,7 +94,7 @@ If you want more features, themes, or a visual editor, these are great choices. 
 
 Also see [ccusage](https://github.com/ccusage/ccusage) (★19.4k), a usage and cost analysis tool that also offers a status line mode.
 
-**Why another one?** We wanted the readability of the dot-gauge design, with a cleaner single style for every bar, native speed, and zero dependencies, all in a file small enough to read in one sitting.
+**Why another one?** To see the limits, the branch and the question you last asked at a glance, at native speed, from one file small enough to read in one sitting.
 
 ## License
 
