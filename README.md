@@ -48,6 +48,8 @@ Run these without `sudo`. `settings.json.bak` can contain API keys; keep it out 
 | 2 | Time and first 60 characters of the last prompt you typed |
 | 3 | Working directory |
 
+Line 2 skips messages that start with `<` (Claude Code marks command output that way) and records over 8 MB, such as very large pasted images, and shows the prompt before them.
+
 Percentages are green below 50%, amber from 50%, and red from 80%. Context shows 0% until Claude Code reports it. Other parts without data are left out: the branch outside git, the limits without a Pro/Max plan, line 2 before the first prompt (or when it is more than 64 MB back).
 
 ## Speed

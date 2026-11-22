@@ -97,9 +97,10 @@ def ours():  # does statusLine.command run this binary?
     if not all(re.fullmatch(r"[\w=-]+", a) for a in args):
         return False
     if not cmd.lstrip().startswith("'"):  # unless single-quoted, the shell expands it
-        exe = os.path.expanduser(os.path.expandvars(exe))
-        if "$" in exe or "`" in exe:
+        exe = os.path.expandvars(exe)
+        if "$" in exe or "`" in exe:  # checked before ~, as HOME itself may contain them
             return False
+        exe = os.path.expanduser(exe)
     return os.path.isabs(exe) and os.path.realpath(exe) == os.path.realpath(binary)
 
 if action == "check":

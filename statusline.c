@@ -1,7 +1,7 @@
 /*
  * Claude Code statusline: fast, dependency-free C.
  *
- *   Opus 5.5 | high | main* | 42% | 5h 23% (1h12m) | 7d 41% (3d4h)
+ *   Opus 5.5 | high | main* | 42% | 5h 23% (1h12m) | 7d 61% (3d4h)
  *   ▸ 14:20 Add dark mode to the settings page
  *   └ ~/projects/my-app
  *
@@ -263,7 +263,7 @@ typedef struct { char when[8], text[PROMPT_CHARS * 4 + 8]; } Prompt;
 static int starts_tag(const char *s) {
     if (!s || *s != '"') return 0;
     s++;
-    return next_cp(&s) == '<'; /* decoded, as it may be written < */
+    return next_cp(&s) == '<'; /* decoded, as it may be written as a JSON escape */
 }
 
 /* Fills pr and returns 1 when line is a prompt the user typed. */
@@ -412,18 +412,18 @@ static int find_root(const char *dir, char *p, size_t cap) {
     }
 }
 
-static volatile sig_atomic_t child; /* the running git */
+static volatile sig_atomic_t child; /* the running git, which leads its own process group */
 
 /* a git that hangs is killed; again a second later, in case its child holds the pipe */
 static void on_timeout(int sig) {
     (void)sig;
-    if (child > 0) kill((pid_t)child, SIGKILL);
+    if (child > 0) kill(-(pid_t)child, SIGKILL); /* with the git it started for submodules */
     alarm(1);
 }
 
 /* a cancelled status line takes its git with it */
 static void on_cancel(int sig) {
-    if (child > 0) kill((pid_t)child, SIGTERM);
+    if (child > 0) kill(-(pid_t)child, SIGTERM);
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -485,7 +485,8 @@ static int git_start(const char *dir) {
     posix_spawnattr_t at;
     posix_spawnattr_init(&at);
     posix_spawnattr_setsigmask(&at, &old);
-    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK);
+    posix_spawnattr_setpgroup(&at, 0);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETPGROUP);
     int err = posix_spawnp(&pid, "git", &fa, &at, argv, environ);
     if (!err) child = pid;
     sigprocmask(SIG_SETMASK, &old, NULL);
@@ -519,7 +520,7 @@ static void git_finish(int fd, char *out, size_t cap) {
         close(fd);
     }
     pid_t pid = (pid_t)child;
-    if (dirty) kill(pid, SIGTERM);
+    if (dirty) kill(-pid, SIGTERM);
     while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
     child = 0;
     alarm(0);
